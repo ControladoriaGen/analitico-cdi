@@ -13,6 +13,51 @@ import {
   YAxis,
 } from "recharts";
 
+// ===== Persistência de usuários pra API do GitHub =====
+const GH_OWNER = "ControladoriaGen";
+const GH_REPO  = "analitico-cdi";    
+const GH_BRANCH = "main";
+const GH_USERS_PATH = "public/users.json";  // onde salvo os usuários
+const GH_API_BASE = "https://api.github.com";
+const GH_RAW = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/${GH_BRANCH}/${GH_USERS_PATH}`;
+
+// ================== Api dos logins ====================
+async function ghGetFileSha(pat: string) {
+  const url = `${GH_API_BASE}/repos/${GH_OWNER}/${GH_REPO}/contents/${encodeURIComponent(GH_USERS_PATH)}?ref=${GH_BRANCH}`;
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${pat}`, Accept: "application/vnd.github+json" }
+  });
+  if (r.status === 404) return null; // arquivo ainda não existe
+  if (!r.ok) throw new Error(`GitHub GET falhou: ${r.status}`);
+  const j = await r.json();
+  return j.sha as string;
+}
+
+async function ghPutFile(pat: string, contentStr: string, sha: string | null, message: string) {
+  const url = `${GH_API_BASE}/repos/${GH_OWNER}/${GH_REPO}/contents/${encodeURIComponent(GH_USERS_PATH)}`;
+  const body = {
+    message,
+    content: btoa(unescape(encodeURIComponent(contentStr))),
+    branch: GH_BRANCH,
+    sha: sha || undefined,
+  } as any;
+
+  const r = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github+json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!r.ok) {
+    const txt = await r.text(); // ajuda a diagnosticar (permissão/SSO/etc)
+    throw new Error(`GitHub PUT falhou: ${r.status} ${r.statusText}\n${txt}`);
+  }
+  return r.json();
+}
+
 // =============================================================
 // MARCA / CORES / CONFIG
 // =============================================================
