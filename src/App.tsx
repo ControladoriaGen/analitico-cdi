@@ -1,756 +1,894 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
-/** ===========================
- *  CONFIG
- *  =========================== */
-const SHAREPOINT_XLSX =
+/* =========================
+   CONFIG
+========================= */
+
+// SharePoint (sempre baixar de novo)
+const SP_URL =
   "https://generosocombr-my.sharepoint.com/personal/controladoria_generoso_com_br/_layouts/15/download.aspx?share=ESLYowVkuEBEu82Jfnk-JQ0BfoDxwkd99RFtXTEzbARXEg&download=1";
 
-type Perfil = "admin" | "user";
-type Usuario = { user: string; pass: string; perfil: Perfil; unidade?: string | "*" };
+// A aba verdadeira é "CDIAutomtico1" (sem acento). Vamos localizar de forma tolerante.
+const TARGET_SHEET_HINT = "CDIAutomtico1";
 
-type LinhaPlaca = {
-  Data?: string | Date;
-  Unidade?: string;
-  Tipo?: string;
-  Placa?: string;
-  Peso?: number;
-  CTRCs?: number;
-  Coletas?: number;
-  Entregas?: number;
-  Receita?: number;
-  Custo?: number;
+// Chave do users.json na branch main
+const GH_OWNER = "ControladoriaGen";
+const GH_REPO = "analitico-cdi";
+const GH_BRANCH = "main";
+const GH_USERS_PATH = "public/users.json";
+
+const GH_API_BASE = "https://api.github.com";
+const GH_RAW = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/${GH_BRANCH}/${GH_USERS_PATH}`;
+
+// fundo login (coloque a imagem em public/login-bg.jpg)
+const LOGIN_BG = "/analitico-cdi/login-bg.jpg";
+
+/* =========================
+   UTILS
+========================= */
+
+const stripDiacritics = (s: string) =>
+  (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const normalizeKey = (s: string) =>
+  stripDiacritics(String(s)).toLowerCase().replace(/\s+|_/g, "");
+
+const coerceNumberBR = (val: any): number | null => {
+  if (val == null) return null;
+  if (typeof val === "number") return Number.isFinite(val) ? val : null;
+  const s = String(val).trim();
+  if (!s) return null;
+  // remove milhar ".", troca "," por "."
+  const n = parseFloat(s.replace(/\./g, "").replace(",", "."));
+  return Number.isNaN(n) ? null : n;
 };
 
-type TotUnit = {
-  Unidade: string;
-  Receita: number;
-  Custo: number;
-  Entregas: number;
-  Coletas: number;
-  CTRCs: number;
-  Peso: number;
+const asDate = (v: any): Date | null => {
+  if (v == null || v === "") return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
+  if (typeof v === "number") {
+    // serial do Excel
+    const o = XLSX.SSF.parse_date_code(v);
+    if (o && o.y && o.m && o.d) return new Date(o.y, o.m - 1, o.d);
+  }
+  const s = String(v).trim();
+  // 17/09/2025, 2025-09-17, 17-09-2025 etc.
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m1) {
+    const d = +m1[1], mo = +m1[2], y = +m1[3] < 100 ? 2000 + +m1[3] : +m1[3];
+    const dt = new Date(y, mo - 1, d);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  }
+  const dt = new Date(s);
+  return Number.isNaN(dt.getTime()) ? null : dt;
 };
 
-type Sessao = { usuario: string; perfil: Perfil; unidade: string | "*" };
+const fmtBRL = (n: number) =>
+  n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
 
-/** ===========================
- *  ESTILO GLOBAL (tema claro + componentes)
- *  =========================== */
-function useInjectCSS() {
-  useEffect(() => {
-    const css = `
-:root { color-scheme: only light; }
-html, body, #root { height: 100%; }
-body {
-  background: #f5f7fb !important;
-  color: #1f2937;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
-}
-* { box-sizing: border-box; }
+const fmtInt = (n: number) => n.toLocaleString("pt-BR");
+const fmtKg = (n: number) =>
+  n.toLocaleString("pt-BR", { maximumFractionDigits: 0 });
 
-.app-shell {
-  min-height: 100%;
-  background: #f5f7fb;
-}
+/* =========================
+   LOGIN / USERS
+========================= */
 
-.container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+type UserRec = { usuario: string; senha: string; perfil: "admin" | "user"; unidade?: string };
 
-.card {
-  background: #ffffff; border-radius: 10px; box-shadow: 0 6px 18px rgba(16,24,40,.06);
-  padding: 14px;
-}
-
-.header {
-  background: #0f3a82; color: #fff;
-  padding: 16px 0;
-  position: sticky; top: 0; z-index: 10;
-  box-shadow: 0 6px 16px rgba(15,58,130,.25);
-}
-.header .container { display:flex; align-items:center; justify-content:space-between; gap: 16px; }
-.header h1 { font-size: 18px; margin:0; }
-.header small { opacity: .8; display:block; margin-top: 2px; }
-.header .who { font-size: 12px; opacity:.9; }
-
-.row { display:grid; gap:12px; }
-.row.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
-.row.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
-
-.badge {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; padding: 4px 8px; border-radius: 999px; background:#f1f5f9; color:#0f172a;
-}
-.badge.ok { background: #e8f8ef; color:#0e7a39; }
-.badge.warn { background: #ffefef; color:#b91c1c; }
-
-.kpi { display:flex; align-items:center; justify-content:space-between; }
-.kpi .v { font-weight: 600; font-size: 22px; }
-.kpi .l { color:#475569; font-size:13px; }
-
-select, input[type="text"], input[type="password"] {
-  width: 100%; appearance: none;
-  background: #fff; color: #0f172a;
-  border: 1px solid #d1d5db; border-radius: 8px;
-  height: 36px; padding: 0 12px;
-  outline: none;
-}
-select:focus, input:focus { border-color: #0f3a82; box-shadow: 0 0 0 3px rgba(15,58,130,.15); }
-
-.btn {
-  height: 36px; border-radius: 8px; padding: 0 14px; border: 0; cursor: pointer;
-  background:#0f3a82; color:#fff; font-weight: 600;
-  box-shadow: 0 8px 16px rgba(15,58,130,.24);
-}
-.btn:disabled { opacity: .6; cursor: not-allowed; }
-.btn.secondary { background:#0ea5e9; }
-.btn.ghost { background:#fff; color:#0f3a82; border:1px solid #cbd5e1; }
-
-.table { width:100%; border-collapse: collapse; }
-.table th, .table td { font-size: 13px; padding: 10px 8px; border-bottom:1px solid #eef2f7; }
-.table th { text-align:left; background:#0f3a82; color:#fff; position: sticky; top: 62px; z-index: 5; }
-
-.section-title { background:#0f3a82; color:#fff; padding: 10px 12px; border-radius: 10px 10px 0 0; font-weight: 600; }
-
-.login-wrap {
-  min-height: 100svh;
-  display: grid; grid-template-columns: 420px 1fr;
-  align-items: stretch;
-}
-.login-left {
-  padding: 28px;
-  display:flex; align-items:flex-start; justify-content:center;
-}
-.login-card { width: 100%; max-width: 360px; }
-
-.login-bg {
-  min-height: 100%;
-  background-image: url('https://generoso.com.br/static/7044e3eebe94961b290fb958dd42e7bc/17951/top-main-bg.webp');
-  background-size: cover; background-position: center center;
-  filter: saturate(.95);
-}
-
-.footer-gap { height: 24px; }
-    `;
-    const el = document.createElement("style");
-    el.id = "force-light-css";
-    el.textContent = css;
-    document.head.appendChild(el);
-    return () => el.remove();
-  }, []);
-}
-
-/** ===========================
- *  UTILS
- *  =========================== */
-const fmt = new Intl.NumberFormat("pt-BR");
-const fmtKg = (v: number) => (isFinite(v) ? fmt.format(v) : "0");
-const fmtMoeda = (v: number) =>
-  isFinite(v) ? "R$ " + fmt.format(v) : "R$ 0";
-
-function pickNumber(row: any, keys: string[]): number {
-  for (const k of keys) {
-    if (row[k] == null) continue;
-    const v = Number(
-      String(row[k]).replace(/\./g, "").replace(",", ".").replace(/\s/g, "")
-    );
-    if (!isNaN(v)) return v;
+async function fetchUsersRemote(): Promise<UserRec[] | null> {
+  try {
+    const r = await fetch(GH_RAW, { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return Array.isArray(j) ? (j as UserRec[]) : null;
+  } catch {
+    return null;
   }
-  return 0;
 }
 
-function pickString(row: any, keys: string[]): string | undefined {
-  for (const k of keys) {
-    const v = row[k];
-    if (v != null && String(v).trim() !== "") return String(v).trim();
+function loadUsersLocal(): UserRec[] | null {
+  try {
+    const s = localStorage.getItem("users_local");
+    if (!s) return null;
+    const j = JSON.parse(s);
+    return Array.isArray(j) ? (j as UserRec[]) : null;
+  } catch {
+    return null;
   }
-  return undefined;
 }
 
-function pickDate(row: any, keys: string[]): Date | undefined {
-  for (const k of keys) {
-    const v = row[k];
-    if (v == null || v === "") continue;
-    if (v instanceof Date) return v;
-    // Excel date serial
-    const n = Number(v);
-    if (!isNaN(n) && n > 25000 && n < 80000) {
-      return XLSX.SSF.parse_date_code(n)
-        ? new Date(
-            Date.UTC(
-              XLSX.SSF.parse_date_code(n)!.y,
-              (XLSX.SSF.parse_date_code(n)!.m || 1) - 1,
-              XLSX.SSF.parse_date_code(n)!.d || 1
-            )
-          )
-        : undefined;
+/* =========================
+   DATA TYPES
+========================= */
+
+type Row = Record<string, any>;
+
+type MappedCols = {
+  dateCol: string | null;
+  unitCol: string | null;
+  typeCol: string | null;
+  relCol: string | null;
+  plateCol: string | null;
+
+  // métricas
+  receitaCols: string[]; // nomes que contenham 'receita'/'faturamento'
+  custoCols: string[];   // nomes que iniciem por 'sum' (custos)
+  entregasCols: string[]; // contenham 'entrega'
+  coletasCols: string[];  // contenham 'coleta'
+  ctrcsCols: string[];    // contenham 'ctrc'
+  pesoCols: string[];     // contenham 'peso'
+};
+
+function mapColumns(headers: string[]): MappedCols {
+  const norm = (h: string) => normalizeKey(h);
+
+  const dateCol =
+    headers.find((h) => /datab|databas|data/.test(norm(h))) || null;
+
+  const unitCol =
+    headers.find((h) => /unidade/.test(norm(h))) || null;
+
+  const typeCol =
+    headers.find((h) => /tipo/.test(norm(h))) || null;
+
+  const relCol =
+    headers.find((h) => /relaciona/.test(norm(h))) || null;
+
+  const plateCol =
+    headers.find((h) => /placa/.test(norm(h))) || null;
+
+  const receitaCols = headers.filter(
+    (h) => /receita|fatura/.test(norm(h))
+  );
+
+  const custoCols = headers.filter(
+    (h) => /^sum/.test(h) || /^sum/.test(norm(h)) // SumAjudante, SumComissao...
+  );
+
+  const entregasCols = headers.filter((h) => /entrega/.test(norm(h)));
+  const coletasCols = headers.filter((h) => /coleta/.test(norm(h)));
+  const ctrcsCols   = headers.filter((h) => /ctrc/.test(norm(h)));
+  const pesoCols    = headers.filter((h) => /peso/.test(norm(h)));
+
+  return {
+    dateCol,
+    unitCol,
+    typeCol,
+    relCol,
+    plateCol,
+    receitaCols,
+    custoCols,
+    entregasCols,
+    coletasCols,
+    ctrcsCols,
+    pesoCols,
+  };
+}
+
+function sumCols(rows: Row[], cols: string[], parseAsNumber = true): number {
+  if (!cols.length) return 0;
+  let total = 0;
+  for (const r of rows) {
+    for (const c of cols) {
+      const v = r[c];
+      const n = parseAsNumber ? coerceNumberBR(v) : Number(v);
+      if (n != null) total += n;
     }
-    // String date
-    const d = new Date(String(v));
-    if (!isNaN(d.getTime())) return d;
   }
-  return undefined;
+  return total;
 }
 
-/** ===========================
- *  XLSX → dados
- *  =========================== */
-async function fetchPlanilha(): Promise<{
-  porPlaca: LinhaPlaca[];
-  lastDate?: Date;
-}> {
-  // cache-busting + no-store
-  const url = SHAREPOINT_XLSX + (SHAREPOINT_XLSX.includes("?") ? "&" : "?") + "ts=" + Date.now();
+/* =========================
+   APP
+========================= */
 
-  const resp = await fetch(url, {
-    cache: "no-store",
-    headers: { "Cache-Control": "no-cache, no-store, must-revalidate", Pragma: "no-cache" },
-  });
-  if (!resp.ok) throw new Error(`Falha ao baixar XLSX (${resp.status})`);
-  const ab = await resp.arrayBuffer();
-  const wb = XLSX.read(ab, { type: "array" });
+const App: React.FC = () => {
+  // auth
+  const [users, setUsers] = useState<UserRec[] | null>(null);
+  const [user, setUser] = useState<UserRec | null>(null);
+  const [loginU, setLoginU] = useState("");
+  const [loginP, setLoginP] = useState("");
+  const [authError, setAuthError] = useState("");
 
-  // Procura a aba com colunas de placa (Unidade/Tipo/Placa são obrigatórias)
-  let sheetName = wb.SheetNames.find((n) => {
-    const ws = wb.Sheets[n];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true }) as any[][];
-    if (!rows.length) return false;
-    const head = (rows[0] || []).map((h: any) => String(h || "").toLowerCase());
-    return (
-      head.some((h) => h.includes("unidade")) &&
-      head.some((h) => h.includes("tipo")) &&
-      head.some((h) => h.includes("placa"))
-    );
-  });
-  if (!sheetName) {
-    // fallback: primeira
-    sheetName = wb.SheetNames[0];
-  }
-
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { raw: true }) as any[];
-
-  // Normaliza por cabeçalhos conhecidos
-  const porPlaca: LinhaPlaca[] = rows.map((r) => {
-    const Data = pickDate(r, ["Data", "data", "Dia", "DT", "dt"]);
-    const Unidade = pickString(r, ["Unidade", "unidade", "Filial", "filial"]);
-    const Tipo = pickString(r, ["Tipo", "tipo", "Tipo de Veículo", "Veículo"]);
-    const Placa = pickString(r, ["Placa", "placa", "Placa Veículo"]);
-    const Peso = pickNumber(r, ["Peso", "Peso (kg)", "peso", "kg"]);
-    const CTRCs = pickNumber(r, ["CTRCs", "CTRC", "ctrcs", "Notas", "Qtd CTRCs"]);
-    const Coletas = pickNumber(r, ["Coletas", "coletas"]);
-    const Entregas = pickNumber(r, ["Entregas", "entregas"]);
-    const Receita = pickNumber(r, ["Receita", "receita", "Faturamento", "Valor Receita"]);
-    const Custo = pickNumber(r, ["Custo", "custo", "Custo Total", "Total Custos"]);
-
-    return { Data, Unidade, Tipo, Placa, Peso, CTRCs, Coletas, Entregas, Receita, Custo };
-  });
-
-  const lastDate = porPlaca
-    .map((l) => (l.Data ? new Date(l.Data) : undefined))
-    .filter(Boolean)
-    .sort((a: any, b: any) => +b - +a)[0];
-
-  return { porPlaca, lastDate };
-}
-
-/** ===========================
- *  APP
- *  =========================== */
-export default function App() {
-  useInjectCSS();
-
-  const [sessao, setSessao] = useState<Sessao | null>(null);
+  // dados
   const [loading, setLoading] = useState(false);
-  const [porPlaca, setPorPlaca] = useState<LinhaPlaca[]>([]);
-  const [lastDate, setLastDate] = useState<Date | undefined>(undefined);
+  const [err, setErr] = useState<string>("");
 
-  // Filtros
-  const [fUn, setFUn] = useState<string>("(todos)");
-  const [fTipo, setFTipo] = useState<string>("(todos)");
-  const [fRel, setFRel] = useState<string>("(todos)");
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [mapped, setMapped] = useState<MappedCols | null>(null);
 
-  /** ======= Login mínimo (com 1 admin padrão local) ======= */
-  const usuariosPadrao: Usuario[] = [
-    { user: "gustavo", pass: "123456", perfil: "admin", unidade: "*" },
-  ];
+  const [unidade, setUnidade] = useState<string>("(todos)");
+  const [tipo, setTipo] = useState<string>("(todos)");
+  const [rel, setRel] = useState<string>("(todos)");
+
+  const [lastDate, setLastDate] = useState<Date | null>(null);
+
+  // ======= LOGIN =======
   useEffect(() => {
-    // mantém login anterior
-    const raw = localStorage.getItem("sessao");
-    if (raw) setSessao(JSON.parse(raw));
+    (async () => {
+      // prioridade: remoto -> local
+      const remote = await fetchUsersRemote();
+      if (remote) {
+        setUsers(remote);
+        return;
+      }
+      const local = loadUsersLocal();
+      setUsers(local || []);
+    })();
   }, []);
 
-  function doLogin(u: string, p: string) {
-    const users: Usuario[] = usuariosPadrao; // (persistência já está ok no seu projeto)
-    const hit = users.find((x) => x.user.toLowerCase() === u.toLowerCase() && x.pass === p);
-    if (!hit) {
-      alert("Usuário não encontrado");
+  function doLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthError("");
+    if (!users || !users.length) {
+      setAuthError("Lista de usuários não carregada.");
       return;
     }
-    const s: Sessao = { usuario: hit.user, perfil: hit.perfil, unidade: hit.unidade || "*" };
-    setSessao(s);
-    localStorage.setItem("sessao", JSON.stringify(s));
-  }
-  function logout() {
-    setSessao(null);
-    localStorage.removeItem("sessao");
+    const found = users.find(
+      (u) => u.usuario === loginU && u.senha === loginP
+    );
+    if (!found) {
+      setAuthError("Usuário ou senha inválidos.");
+      return;
+    }
+    setUser(found);
+    setLoginP("");
   }
 
-  /** ======= Carregar XLSX (sempre sem cache) ======= */
-  async function recarregar() {
+  function logout() {
+    setUser(null);
+  }
+
+  // ======= LEITURA SHAREPOINT =======
+  async function loadFromSharePoint() {
+    setLoading(true);
+    setErr("");
     try {
-      setLoading(true);
-      const { porPlaca: linhas, lastDate } = await fetchPlanilha();
-      setPorPlaca(linhas);
-      setLastDate(lastDate);
+      const url = `${SP_URL}${SP_URL.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const resp = await fetch(url, { method: "GET", cache: "no-store" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ao baixar o arquivo`);
+
+      const buf = await resp.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+
+      // localizar a aba de forma tolerante
+      const want = normalizeKey(TARGET_SHEET_HINT);
+      let chosen = wb.SheetNames.find((n) => normalizeKey(n) === want);
+      if (!chosen)
+        chosen = wb.SheetNames.find((n) =>
+          normalizeKey(n).includes(want)
+        );
+      if (!chosen) {
+        throw new Error(
+          `Aba "${TARGET_SHEET_HINT}" não encontrada. Abas: ${wb.SheetNames.join(", ")}`
+        );
+      }
+
+      const ws = wb.Sheets[chosen];
+      const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+      if (!aoa || !aoa.length) throw new Error(`Aba "${chosen}" vazia.`);
+
+      const hdr = aoa[0].map((h) => String(h || "").trim());
+      const data = aoa.slice(1).map((line) => {
+        const o: Row = {};
+        hdr.forEach((h, i) => (o[h] = line[i]));
+        return o;
+      });
+
+      setHeaders(hdr);
+      const m = mapColumns(hdr);
+      setMapped(m);
+
+      // normaliza a coluna Data Base -> Date
+      const dateCol = m.dateCol;
+      const normalized = dateCol
+        ? data.map((r) => ({ ...r, __date__: asDate(r[dateCol]) }))
+        : data.map((r) => ({ ...r, __date__: null as Date | null }));
+
+      // último dia disponível
+      let maxDate: Date | null = null;
+      for (const r of normalized) {
+        if (r.__date__ && (!maxDate || r.__date__ > maxDate)) maxDate = r.__date__;
+      }
+      setLastDate(maxDate);
+
+      setRows(normalized);
     } catch (e: any) {
       console.error(e);
-      alert("Falha ao recarregar planilha: " + e.message);
+      setErr(e?.message || String(e));
+      setHeaders([]);
+      setRows([]);
+      setMapped(null);
+      setLastDate(null);
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    if (sessao) recarregar();
-  }, [sessao]);
+    if (user) loadFromSharePoint();
+  }, [user]);
 
-  /** ======= Domínios de filtro ======= */
-  const domUnidades = useMemo(() => {
-    const set = new Set<string>();
-    porPlaca.forEach((r) => r.Unidade && set.add(r.Unidade));
-    return ["(todos)", ...Array.from(set).sort()];
-  }, [porPlaca]);
-
-  const domTipos = useMemo(() => {
-    const set = new Set<string>();
-    porPlaca.forEach((r) => r.Tipo && set.add(r.Tipo));
-    return ["(todos)", ...Array.from(set).sort()];
-  }, [porPlaca]);
-
-  const domRel = ["(todos)"]; // reservado – mantém layout
-
-  /** ======= Dados filtrados ======= */
-  const filtrado = useMemo(() => {
-    return porPlaca.filter((r) => {
-      if (fUn !== "(todos)" && r.Unidade !== fUn) return false;
-      if (fTipo !== "(todos)" && r.Tipo !== fTipo) return false;
-      if (fRel !== "(todos)") {
-        // placeholder
-      }
-      if (sessao?.unidade && sessao.unidade !== "*" && r.Unidade !== sessao.unidade) return false;
-      return true;
+  // ======= FILTRO & AGREGAÇÃO =======
+  const unidades = useMemo(() => {
+    if (!mapped?.unitCol) return [];
+    const s = new Set<string>();
+    rows.forEach((r) => {
+      const v = String(r[mapped.unitCol as string] ?? "").trim();
+      if (v) s.add(v);
     });
-  }, [porPlaca, fUn, fTipo, fRel, sessao]);
+    return Array.from(s).sort();
+  }, [rows, mapped]);
 
-  /** ======= Agregações ======= */
-  const resumoGeral = useMemo(() => {
-    const base: TotUnit[] = [];
-    const idx = new Map<string, number>();
-    function add(u: string, inc: Partial<TotUnit>) {
-      if (!idx.has(u)) {
-        idx.set(u, base.length);
-        base.push({ Unidade: u, Receita: 0, Custo: 0, Entregas: 0, Coletas: 0, CTRCs: 0, Peso: 0 });
-      }
-      const i = idx.get(u)!;
-      base[i].Receita += inc.Receita || 0;
-      base[i].Custo += inc.Custo || 0;
-      base[i].Entregas += inc.Entregas || 0;
-      base[i].Coletas += inc.Coletas || 0;
-      base[i].CTRCs += inc.CTRCs || 0;
-      base[i].Peso += inc.Peso || 0;
+  const tipos = useMemo(() => {
+    if (!mapped?.typeCol) return [];
+    const s = new Set<string>();
+    rows.forEach((r) => {
+      const v = String(r[mapped.typeCol as string] ?? "").trim();
+      if (v) s.add(v);
+    });
+    return Array.from(s).sort();
+  }, [rows, mapped]);
+
+  const rels = useMemo(() => {
+    if (!mapped?.relCol) return [];
+    const s = new Set<string>();
+    rows.forEach((r) => {
+      const v = String(r[mapped.relCol as string] ?? "").trim();
+      if (v) s.add(v);
+    });
+    return Array.from(s).sort();
+  }, [rows, mapped]);
+
+  const filtered = useMemo(() => {
+    let arr = rows;
+    // por padrão, mostrar somente o último dia (se existir)
+    if (lastDate) {
+      arr = arr.filter((r) => r.__date__ && +r.__date__ === +lastDate);
     }
-    filtrado.forEach((r) => {
-      const u = r.Unidade || "-";
-      add(u, {
-        Receita: r.Receita || 0,
-        Custo: r.Custo || 0,
-        Entregas: r.Entregas || 0,
-        Coletas: r.Coletas || 0,
-        CTRCs: r.CTRCs || 0,
-        Peso: r.Peso || 0,
-      });
-    });
-    base.sort((a, b) => a.Unidade.localeCompare(b.Unidade));
-    const total = base.reduce(
-      (acc, x) => ({
-        Receita: acc.Receita + x.Receita,
-        Custo: acc.Custo + x.Custo,
-        Entregas: acc.Entregas + x.Entregas,
-        Coletas: acc.Coletas + x.Coletas,
-        CTRCs: acc.CTRCs + x.CTRCs,
-        Peso: acc.Peso + x.Peso,
-      }),
-      { Receita: 0, Custo: 0, Entregas: 0, Coletas: 0, CTRCs: 0, Peso: 0 }
-    );
-    return { linhas: base, total };
-  }, [filtrado]);
-
-  /** ======= Sinalização por placa (vs média por tipo/unidade) ======= */
-  const placaSinal = useMemo(() => {
-    // médias por (Unidade, Tipo)
-    const grp = new Map<string, { Peso: number; CTRCs: number; Coletas: number; Entregas: number; n: number }>();
-    filtrado.forEach((r) => {
-      const key = (r.Unidade || "-") + "||" + (r.Tipo || "-");
-      if (!grp.has(key)) grp.set(key, { Peso: 0, CTRCs: 0, Coletas: 0, Entregas: 0, n: 0 });
-      const g = grp.get(key)!;
-      g.Peso += r.Peso || 0;
-      g.CTRCs += r.CTRCs || 0;
-      g.Coletas += r.Coletas || 0;
-      g.Entregas += r.Entregas || 0;
-      g.n += 1;
-    });
-    const medias = new Map<string, { Peso: number; CTRCs: number; Coletas: number; Entregas: number }>();
-    grp.forEach((g, k) =>
-      medias.set(k, {
-        Peso: g.n ? g.Peso / g.n : 0,
-        CTRCs: g.n ? g.CTRCs / g.n : 0,
-        Coletas: g.n ? g.Coletas / g.n : 0,
-        Entregas: g.n ? g.Entregas / g.n : 0,
-      })
-    );
-
-    function flag(v: number, m: number) {
-      if (m === 0 && v === 0) return { txt: "= = média", cls: "badge" };
-      if (v > m) return { txt: "▲ acima", cls: "badge ok" };
-      if (v < m) return { txt: "▼ abaixo", cls: "badge warn" };
-      return { txt: "= = média", cls: "badge" };
+    if (unidade !== "(todos)" && mapped?.unitCol) {
+      arr = arr.filter((r) => String(r[mapped.unitCol as string]) === unidade);
     }
+    if (tipo !== "(todos)" && mapped?.typeCol) {
+      arr = arr.filter((r) => String(r[mapped.typeCol as string]) === tipo);
+    }
+    if (rel !== "(todos)" && mapped?.relCol) {
+      arr = arr.filter((r) => String(r[mapped.relCol as string]) === rel);
+    }
+    return arr;
+  }, [rows, lastDate, unidade, tipo, rel, mapped]);
 
-    return filtrado.map((r) => {
-      const key = (r.Unidade || "-") + "||" + (r.Tipo || "-");
-      const m = medias.get(key) || { Peso: 0, CTRCs: 0, Coletas: 0, Entregas: 0 };
-      return {
-        ...r,
-        flagPeso: flag(r.Peso || 0, m.Peso),
-        flagCT: flag(r.CTRCs || 0, m.CTRCs),
-        flagColeta: flag(r.Coletas || 0, m.Coletas),
-        flagEnt: flag(r.Entregas || 0, m.Entregas),
-      };
-    });
-  }, [filtrado]);
+  const totals = useMemo(() => {
+    if (!mapped) return { receita: 0, custo: 0, entregas: 0, coletas: 0, ctrcs: 0, peso: 0 };
+    const receita = sumCols(filtered, mapped.receitaCols);
+    const custo = sumCols(filtered, mapped.custoCols);
+    const entregas = sumCols(filtered, mapped.entregasCols, true);
+    const coletas = sumCols(filtered, mapped.coletasCols, true);
+    const ctrcs = sumCols(filtered, mapped.ctrcsCols, true);
+    const peso = sumCols(filtered, mapped.pesoCols, true);
+    return { receita, custo, entregas, coletas, ctrcs, peso };
+  }, [filtered, mapped]);
 
-  /** ======= Exportar PDF ======= */
-  async function exportarPDF() {
-    // usa print nativo – com CSS limpo fica apresentável
-    window.print();
-  }
+  /* =========================
+     RENDER
+  ========================= */
 
-  /** ======= Texto automático ======= */
-  const analiseTxt = useMemo(() => {
-    const dt = lastDate ? lastDate : undefined;
-    const un = fUn !== "(todos)" ? fUn : "todas";
-    const t = resumoGeral.total;
-    const pontos: string[] = [];
-    // destaques simples
-    const maiorCusto = resumoGeral.linhas
-      .slice()
-      .sort((a, b) => b.Custo - a.Custo)[0];
-    if (maiorCusto) pontos.push(`custo mais alto: ${maiorCusto.Unidade} (${fmtMoeda(maiorCusto.Custo)})`);
-    return `Unidade: ${un}. Dia ${dt ? dt.toLocaleDateString("pt-BR") : "(arquivo)"}.
-Receita ${fmtMoeda(t.Receita)}, custo ${fmtMoeda(t.Custo)}, entregas ${fmt.format(
-      t.Entregas
-    )}, coletas ${fmt.format(t.Coletas)}, CTRCs ${fmt.format(t.CTRCs)}, peso ${fmtKg(t.Peso)}.
-Pontos de atenção: ${pontos.join("; ") || "—"}.`;
-  }, [resumoGeral, fUn, lastDate]);
-
-  /** ===========================
-   *  RENDER
-   *  =========================== */
-  if (!sessao) {
-    let u = "gustavo";
-    let p = "";
+  if (!user) {
     return (
-      <div className="app-shell">
-        <div className="login-wrap">
-          <div className="login-left">
-            <div className="card login-card">
-              <div className="section-title">CDI – Análise Diária</div>
-              <div style={{ fontSize: 12, color: "#475569", marginTop: 6, marginBottom: 10 }}>
-                Transporte Generoso – Controladoria
-              </div>
-              <div style={{ display: "grid", gap: 8 }}>
-                <div>
-                  <label style={{ fontSize: 12, color: "#475569" }}>Usuário</label>
-                  <input
-                    defaultValue={u}
-                    onChange={(e) => (u = e.target.value)}
-                    type="text"
-                    placeholder="usuário"
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, color: "#475569" }}>Senha</label>
-                  <input
-                    onChange={(e) => (p = e.target.value)}
-                    type="password"
-                    placeholder="senha"
-                  />
-                </div>
-                <div style={{ display: "flex", justifyContent: "flex-start" }}>
-                  <button className="btn" onClick={() => doLogin(u, p)}>
-                    Entrar
-                  </button>
-                </div>
-              </div>
-            </div>
+      <div
+        className="min-h-screen bg-slate-100 flex items-start justify-center py-12"
+        style={{
+          backgroundImage: `linear-gradient(rgba(255,255,255,.75), rgba(255,255,255,.75)), url('${LOGIN_BG}')`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundAttachment: "fixed",
+        }}
+      >
+        <form
+          onSubmit={doLogin}
+          className="w-[360px] rounded-2xl bg-white/90 shadow-lg backdrop-blur border border-slate-200 p-6 space-y-4"
+        >
+          <div className="rounded-xl bg-[#0b3a8c] text-white px-4 py-3 font-semibold">
+            CDI – Análise Diária
           </div>
-          <div className="login-bg" />
-        </div>
+          <p className="text-xs text-slate-600">
+            Transporte Generoso – Controladoria
+          </p>
+          <div>
+            <label className="text-sm text-slate-600">Usuário</label>
+            <input
+              className="mt-1 w-full rounded-lg border px-3 py-2"
+              value={loginU}
+              onChange={(e) => setLoginU(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="text-sm text-slate-600">Senha</label>
+            <input
+              className="mt-1 w-full rounded-lg border px-3 py-2"
+              type="password"
+              value={loginP}
+              onChange={(e) => setLoginP(e.target.value)}
+            />
+          </div>
+          {authError && (
+            <div className="text-red-700 text-sm">{authError}</div>
+          )}
+          <button
+            className="w-full rounded-lg bg-[#0b3a8c] text-white py-2 font-semibold hover:brightness-95"
+            type="submit"
+          >
+            Entrar
+          </button>
+        </form>
       </div>
     );
   }
 
   return (
-    <div className="app-shell">
-      {/* HEADER */}
-      <div className="header">
-        <div className="container">
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      {/* Header */}
+      <div className="sticky top-0 z-10 bg-[#0b3a8c] text-white shadow">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div>
-            <h1>CDI – Análise Diária</h1>
-            <small>Transporte Generoso – Controladoria</small>
-            <small>
+            <div className="font-semibold">CDI – Análise Diária</div>
+            <div className="text-xs opacity-90">
+              Transporte Generoso – Controladoria
+            </div>
+            <div className="text-[11px] mt-1 opacity-90">
               Último dia do arquivo:{" "}
               {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"}
-            </small>
+            </div>
           </div>
-          <div className="who">
-            {sessao.usuario} ({sessao.perfil}){" "}
-            <button className="btn ghost" onClick={logout} style={{ marginLeft: 8 }}>
+          <div className="flex items-center gap-2">
+            <span className="text-xs opacity-90">
+              {user.usuario} ({user.perfil})
+            </span>
+            <button
+              onClick={logout}
+              className="rounded-md bg-white/10 hover:bg-white/20 px-3 py-1 text-sm"
+            >
               Sair
             </button>
           </div>
         </div>
       </div>
 
-      {/* BODY */}
-      <div className="container" style={{ marginTop: 14 }}>
-        {/* FILTROS */}
-        <div className="card" style={{ marginBottom: 12 }}>
-          <div className="row cols-3">
-            <select value={fUn} onChange={(e) => setFUn(e.target.value)}>
-              {domUnidades.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
-            <select value={fTipo} onChange={(e) => setFTipo(e.target.value)}>
-              {domTipos.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
-            <div style={{ display: "flex", gap: 8 }}>
-              <select value={fRel} onChange={(e) => setFRel(e.target.value)} style={{ flex: 1 }}>
-                {domRel.map((u) => (
-                  <option key={u} value={u}>
-                    {u}
-                  </option>
+      <div className="max-w-7xl mx-auto p-4 space-y-6">
+        {/* Filtros */}
+        <div className="rounded-2xl bg-white shadow border p-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="grow min-w-[240px]">
+              <select
+                className="w-full rounded-lg border px-3 py-2 bg-white"
+                value={unidade}
+                onChange={(e) => setUnidade(e.target.value)}
+              >
+                <option>(todos)</option>
+                {unidades.map((u) => (
+                  <option key={u}>{u}</option>
                 ))}
               </select>
-              <button className="btn" onClick={recarregar} disabled={loading}>
-                {loading ? "Carregando..." : "Recarregar"}
-              </button>
-              <button className="btn secondary" onClick={exportarPDF}>
-                Exportar PDF
-              </button>
             </div>
-          </div>
-        </div>
-
-        {/* RESUMO */}
-        <div className="card" style={{ marginBottom: 12 }}>
-          <div style={{ marginBottom: 10, color: "#334155" }}>
-            Resumo do dia {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"} — Unidades:{" "}
-            {fUn !== "(todos)" ? fUn : "(todas)"}.
-          </div>
-          <div className="row cols-3">
-            <div className="card">
-              <div className="kpi">
-                <div className="l">Receita</div>
-                <div className="v">{fmtMoeda(resumoGeral.total.Receita)}</div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="kpi">
-                <div className="l">Custo</div>
-                <div className="v">{fmtMoeda(resumoGeral.total.Custo)}</div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="kpi">
-                <div className="l">Entregas</div>
-                <div className="v">{fmt.format(resumoGeral.total.Entregas)}</div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="kpi">
-                <div className="l">Coletas</div>
-                <div className="v">{fmt.format(resumoGeral.total.Coletas)}</div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="kpi">
-                <div className="l">CTRCs</div>
-                <div className="v">{fmt.format(resumoGeral.total.CTRCs)}</div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="kpi">
-                <div className="l">Peso (kg)</div>
-                <div className="v">{fmtKg(resumoGeral.total.Peso)}</div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Unidade</th>
-                  <th>Receita</th>
-                  <th>Custo</th>
-                  <th>Entregas</th>
-                  <th>Coletas</th>
-                  <th>CTRCs</th>
-                  <th>Peso (kg)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {resumoGeral.linhas.map((l) => (
-                  <tr key={l.Unidade}>
-                    <td>{l.Unidade}</td>
-                    <td>{fmtMoeda(l.Receita)}</td>
-                    <td>{fmtMoeda(l.Custo)}</td>
-                    <td>{fmt.format(l.Entregas)}</td>
-                    <td>{fmt.format(l.Coletas)}</td>
-                    <td>{fmt.format(l.CTRCs)}</td>
-                    <td>{fmtKg(l.Peso)}</td>
-                  </tr>
+            <div className="grow min-w-[240px]">
+              <select
+                className="w-full rounded-lg border px-3 py-2 bg-white"
+                value={tipo}
+                onChange={(e) => setTipo(e.target.value)}
+              >
+                <option>(todos)</option>
+                {tipos.map((t) => (
+                  <option key={t}>{t}</option>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* PLACAS */}
-        <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
-          <div className="section-title">
-            Por Tipo de Veículo → Placa (sinalização vs. média do tipo na unidade)
-          </div>
-          <div style={{ padding: 12 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Unidade</th>
-                  <th>Tipo</th>
-                  <th>Placa</th>
-                  <th>Peso</th>
-                  <th>CTRCs</th>
-                  <th>Coletas</th>
-                  <th>Entregas</th>
-                </tr>
-              </thead>
-              <tbody>
-                {placaSinal.map((r, i) => (
-                  <tr key={r.Placa + i}>
-                    <td>{r.Unidade}</td>
-                    <td>{r.Tipo}</td>
-                    <td>{r.Placa}</td>
-                    <td>
-                      {fmtKg(r.Peso || 0)}{" "}
-                      <span className={r.flagPeso.cls} style={{ marginLeft: 6 }}>
-                        {r.flagPeso.txt}
-                      </span>
-                    </td>
-                    <td>
-                      {fmt.format(r.CTRCs || 0)}{" "}
-                      <span className={r.flagCT.cls} style={{ marginLeft: 6 }}>
-                        {r.flagCT.txt}
-                      </span>
-                    </td>
-                    <td>
-                      {fmt.format(r.Coletas || 0)}{" "}
-                      <span className={r.flagColeta.cls} style={{ marginLeft: 6 }}>
-                        {r.flagColeta.txt}
-                      </span>
-                    </td>
-                    <td>
-                      {fmt.format(r.Entregas || 0)}{" "}
-                      <span className={r.flagEnt.cls} style={{ marginLeft: 6 }}>
-                        {r.flagEnt.txt}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {!placaSinal.length && (
-                  <tr>
-                    <td colSpan={7} style={{ color: "#64748b", fontStyle: "italic" }}>
-                      Nenhum registro para os filtros atuais.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* DECOMPOSIÇÃO DE CUSTO (se disponível nas colunas) */}
-        <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
-          <div className="section-title">
-            Decomposição de tipos de custo + produção do dia (por tipo de custo)
-          </div>
-          <div style={{ padding: 12 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Tipo de custo</th>
-                  <th>Valor</th>
-                  <th>% do total</th>
-                  <th>CTRCs</th>
-                  <th>Coletas</th>
-                  <th>Entregas</th>
-                  <th>Peso (kg)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {/* Sem mapeamento do dicionário de custos específico, mantemos como — */}
-                <tr>
-                  <td style={{ color: "#64748b" }} colSpan={7}>
-                    — Sem aba específica de custos no arquivo (ou sem colunas “Tipo de custo” / “Custo”).
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ANÁLISE AUTOMÁTICA */}
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-          <div className="section-title">Análise automática do dia</div>
-          <div style={{ padding: 12, color: "#0f172a" }}>{analiseTxt}</div>
-        </div>
-
-        {/* ADMIN */}
-        {sessao.perfil === "admin" && (
-          <>
-            <div className="footer-gap" />
-            <div className="card">
-              <div className="section-title">Admin – Gerenciar usuários</div>
-              <div style={{ paddingTop: 10, color: "#64748b" }}>
-                A persistência de usuários que você já configurou continua valendo. Se precisar, posso
-                reexpor aqui os controles de salvar no GitHub (estão intactos no seu projeto).
-              </div>
+              </select>
             </div>
-          </>
+            <div className="grow min-w-[240px]">
+              <select
+                className="w-full rounded-lg border px-3 py-2 bg-white"
+                value={rel}
+                onChange={(e) => setRel(e.target.value)}
+              >
+                <option>(todos)</option>
+                {rels.map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              onClick={loadFromSharePoint}
+              className="rounded-xl bg-[#0b3a8c] text-white px-4 py-2 font-medium hover:brightness-95"
+              disabled={loading}
+            >
+              {loading ? "Carregando..." : "Recarregar"}
+            </button>
+
+            {/* Exportar PDF – simples (print da página) */}
+            <button
+              onClick={() => window.print()}
+              className="rounded-xl bg-emerald-600 text-white px-4 py-2 font-medium hover:brightness-95"
+            >
+              Exportar PDF
+            </button>
+          </div>
+        </div>
+
+        {/* Resumo */}
+        <div className="rounded-2xl bg-white shadow border p-3">
+          <div className="text-sm text-slate-600 mb-3">
+            Resumo do dia{" "}
+            {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"} — Unidades:{" "}
+            {unidade === "(todos)" ? "(todas)" : unidade}.
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-6 gap-3">
+            <Kpi label="Receita" value={fmtBRL(totals.receita)} />
+            <Kpi label="Custo" value={fmtBRL(totals.custo)} />
+            <Kpi label="Entregas" value={fmtInt(totals.entregas)} />
+            <Kpi label="Coletas" value={fmtInt(totals.coletas)} />
+            <Kpi label="CTRCs" value={fmtInt(totals.ctrcs)} />
+            <Kpi label="Peso (kg)" value={fmtKg(totals.peso)} />
+          </div>
+
+          {/* Tabela por Unidade (se existir coluna Unidade) */}
+          {mapped?.unitCol && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-100">
+                    <Th>Unidade</Th>
+                    <Th className="text-right">Receita</Th>
+                    <Th className="text-right">Custo</Th>
+                    <Th className="text-right">Entregas</Th>
+                    <Th className="text-right">Coletas</Th>
+                    <Th className="text-right">CTRCs</Th>
+                    <Th className="text-right">Peso (kg)</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupBy(filtered, mapped.unitCol).map(({ key, items }, i) => {
+                    const rec = sumCols(items, mapped.receitaCols);
+                    const cus = sumCols(items, mapped.custoCols);
+                    const ent = sumCols(items, mapped.entregasCols, true);
+                    const col = sumCols(items, mapped.coletasCols, true);
+                    const ctr = sumCols(items, mapped.ctrcsCols, true);
+                    const pes = sumCols(items, mapped.pesoCols, true);
+                    return (
+                      <tr key={key} className={i % 2 ? "bg-white" : "bg-slate-50"}>
+                        <Td>{key || "-"}</Td>
+                        <Td className="text-right">{fmtBRL(rec)}</Td>
+                        <Td className="text-right">{fmtBRL(cus)}</Td>
+                        <Td className="text-right">{fmtInt(ent)}</Td>
+                        <Td className="text-right">{fmtInt(col)}</Td>
+                        <Td className="text-right">{fmtInt(ctr)}</Td>
+                        <Td className="text-right">{fmtKg(pes)}</Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Por Tipo → Placa (sinalização) */}
+        {mapped?.plateCol && mapped?.typeCol && (
+          <div className="rounded-2xl bg-white shadow border">
+            <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">
+              Por Tipo de Veículo → Placa (sinalização vs. média do tipo na unidade)
+            </div>
+            <div className="p-3 overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-100">
+                    <Th>Unidade</Th>
+                    <Th>Tipo</Th>
+                    <Th>Placa</Th>
+                    <Th className="text-right">Peso</Th>
+                    <Th className="text-right">CTRCs</Th>
+                    <Th className="text-right">Coletas</Th>
+                    <Th className="text-right">Entregas</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byTypePlateSignals(filtered, mapped).map((r, i) => (
+                    <tr key={i} className={i % 2 ? "bg-white" : "bg-slate-50"}>
+                      <Td>{r.unidade}</Td>
+                      <Td>{r.tipo}</Td>
+                      <Td>{r.placa}</Td>
+                      <Td className="text-right">
+                        <BadgeSignal value={r.peso} avg={r.avgPeso} />
+                      </Td>
+                      <Td className="text-right">
+                        <BadgeSignal value={r.ctrcs} avg={r.avgCtrcs} />
+                      </Td>
+                      <Td className="text-right">
+                        <BadgeSignal value={r.coletas} avg={r.avgColetas} />
+                      </Td>
+                      <Td className="text-right">
+                        <BadgeSignal value={r.entregas} avg={r.avgEntregas} />
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
-        <div className="footer-gap" />
+
+        {/* Decomposição de custos (só colunas Sum*) */}
+        {!!mapped?.custoCols.length && (
+          <div className="rounded-2xl bg-white shadow border">
+            <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">
+              Decomposição de tipos de custo + produção do dia (por tipo de custo)
+            </div>
+            <div className="p-3 overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-100">
+                    <Th>Tipo de custo</Th>
+                    <Th className="text-right">Valor</Th>
+                    <Th className="text-right">% do total</Th>
+                    <Th className="text-right">CTRCs</Th>
+                    <Th className="text-right">Coletas</Th>
+                    <Th className="text-right">Entregas</Th>
+                    <Th className="text-right">Peso (kg)</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {costBreakdown(filtered, mapped).map((r, i) => (
+                    <tr key={r.nome} className={i % 2 ? "bg-white" : "bg-slate-50"}>
+                      <Td>{r.nome}</Td>
+                      <Td className="text-right">{fmtBRL(r.valor)}</Td>
+                      <Td className="text-right">
+                        {(r.pct * 100).toLocaleString("pt-BR", {
+                          maximumFractionDigits: 1,
+                        })}%
+                      </Td>
+                      <Td className="text-right">{fmtInt(r.ctrcs)}</Td>
+                      <Td className="text-right">{fmtInt(r.coletas)}</Td>
+                      <Td className="text-right">{fmtInt(r.entregas)}</Td>
+                      <Td className="text-right">{fmtKg(r.peso)}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Análise automática do dia (texto) */}
+        <div className="rounded-2xl bg-white shadow border p-3">
+          <div className="font-semibold mb-2">Análise automática do dia</div>
+          <div className="text-sm text-slate-800">
+            Unidade: {unidade === "(todos)" ? "todas" : unidade}. Dia{" "}
+            {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"}.
+            {" "}Receita {fmtBRL(totals.receita)} (— vs. dia anterior), custo{" "}
+            {fmtBRL(totals.custo)} (—), entregas {fmtInt(totals.entregas)} (—),
+            coletas {fmtInt(totals.coletas)} (—), CTRCs {fmtInt(totals.ctrcs)} (—),
+            peso {fmtKg(totals.peso)} (—).
+            {" "}Custos que mais impactaram hoje: veja a tabela de decomposição.
+          </div>
+        </div>
+
+        {/* Admin (mesma lógica de antes) */}
+        {user.perfil === "admin" && (
+          <AdminBox />
+        )}
+
+        {/* Erros */}
+        {err && (
+          <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-red-800">
+            {err}
+          </div>
+        )}
       </div>
     </div>
   );
+};
+
+/* =========================
+   SUBCOMPONENTES / HELPERS
+========================= */
+
+const Th: React.FC<React.HTMLAttributes<HTMLTableCellElement>> = ({ children, className }) => (
+  <th className={`px-3 py-2 text-left font-semibold text-slate-700 ${className || ""}`}>{children}</th>
+);
+const Td: React.FC<React.HTMLAttributes<HTMLTableCellElement>> = ({ children, className }) => (
+  <td className={`px-3 py-2 align-top ${className || ""}`}>{children}</td>
+);
+const Kpi: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="rounded-xl border bg-white p-3 shadow-sm">
+    <div className="text-xs text-slate-600">{label}</div>
+    <div className="text-xl font-bold">{value}</div>
+  </div>
+);
+
+function groupBy(arr: Row[], col: string | null) {
+  if (!col) return [];
+  const map = new Map<string, Row[]>();
+  for (const r of arr) {
+    const key = String(r[col] ?? "");
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(r);
+  }
+  return Array.from(map.entries()).map(([key, items]) => ({ key, items }));
 }
 
-    </>
+const clamp = (n: number) => (Number.isFinite(n) ? n : 0);
+
+const BadgeSignal: React.FC<{ value: number; avg: number }> = ({ value, avg }) => {
+  const diff = value - avg;
+  const cls =
+    Math.abs(diff) < 1e-9
+      ? "bg-slate-100 text-slate-700"
+      : diff >= 0
+      ? "bg-green-100 text-green-700"
+      : "bg-red-100 text-red-700";
+  const text =
+    Math.abs(diff) < 1e-9
+      ? "= = média"
+      : diff > 0
+      ? "▲ acima"
+      : "▼ abaixo";
+  return (
+    <span className={`inline-block rounded-md px-2 py-[2px] text-[11px] ${cls}`}>
+      {fmtInt(clamp(value))} {text}
+    </span>
   );
+};
+
+function byTypePlateSignals(rows: Row[], m: MappedCols) {
+  if (!m.unitCol || !m.typeCol || !m.plateCol) return [];
+  // médias por (unidade,tipo)
+  const keyUT = (r: Row) => `${r[m.unitCol!]}||${r[m.typeCol!]}`;
+  const groups = new Map<string, Row[]>();
+  rows.forEach((r) => {
+    const k = keyUT(r);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(r);
+  });
+  const avg = new Map<string, { peso: number; ctrcs: number; coletas: number; entregas: number }>();
+  for (const [k, items] of groups) {
+    const a = {
+      peso: sumCols(items, m.pesoCols, true) / Math.max(items.length, 1),
+      ctrcs: sumCols(items, m.ctrcsCols, true) / Math.max(items.length, 1),
+      coletas: sumCols(items, m.coletasCols, true) / Math.max(items.length, 1),
+      entregas: sumCols(items, m.entregasCols, true) / Math.max(items.length, 1),
+    };
+    avg.set(k, a);
+  }
+  // linhas
+  return rows.map((r) => {
+    const k = keyUT(r);
+    const a = avg.get(k) || { peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
+    return {
+      unidade: r[m.unitCol!],
+      tipo: r[m.typeCol!],
+      placa: r[m.plateCol!],
+      peso: clamp(sumCols([r], m.pesoCols, true)),
+      ctrcs: clamp(sumCols([r], m.ctrcsCols, true)),
+      coletas: clamp(sumCols([r], m.coletasCols, true)),
+      entregas: clamp(sumCols([r], m.entregasCols, true)),
+      avgPeso: clamp(a.peso),
+      avgCtrcs: clamp(a.ctrcs),
+      avgColetas: clamp(a.coletas),
+      avgEntregas: clamp(a.entregas),
+    };
+  });
 }
+
+function costBreakdown(rows: Row[], m: MappedCols) {
+  if (!m.custoCols.length) return [];
+  const total = sumCols(rows, m.custoCols);
+  const out = m.custoCols.map((c) => {
+    const nome = c.replace(/^Sum/i, "");
+    const valor = sumCols(rows, [c]);
+    const pct = total > 0 ? valor / total : 0;
+    const ctrcs = sumCols(rows, m.ctrcsCols, true);
+    const coletas = sumCols(rows, m.coletasCols, true);
+    const entregas = sumCols(rows, m.entregasCols, true);
+    const peso = sumCols(rows, m.pesoCols, true);
+    return { nome, valor, pct, ctrcs, coletas, entregas, peso };
+  });
+  // ordena desc por valor
+  out.sort((a, b) => b.valor - a.valor);
+  return out;
+}
+
+/* ============== Admin simples (mantém o que já funcionava) ============== */
+
+const AdminBox: React.FC = () => {
+  const [pat, setPat] = useState<string>(localStorage.getItem("gh_pat") || "");
+  const [saveMsg, setSaveMsg] = useState<string>("");
+
+  async function ghGetFileSha(path: string) {
+    const url = `${GH_API_BASE}/repos/${GH_OWNER}/${GH_REPO}/contents/${encodeURIComponent(path)}?ref=${GH_BRANCH}`;
+    const r = await fetch(url, {
+      headers: { Accept: "application/vnd.github+json", Authorization: pat ? `Bearer ${pat}` : "" },
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`GitHub GET status=${r.status}`);
+    const j = await r.json();
+    return j.sha as string;
+  }
+
+  async function ghPutJson(path: string, contentObj: any) {
+    const url = `${GH_API_BASE}/repos/${GH_OWNER}/${GH_REPO}/contents/${encodeURIComponent(path)}`;
+    const sha = await ghGetFileSha(path);
+    const body = {
+      message: `update ${path}`,
+      content: btoa(unescape(encodeURIComponent(JSON.stringify(contentObj, null, 2)))),
+      branch: GH_BRANCH,
+      ...(sha ? { sha } : {}),
+    };
+    const r = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: pat ? `Bearer ${pat}` : "",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`GitHub PUT falhou: ${r.status}`);
+    return await r.json();
+  }
+
+  async function recarregarDoGh() {
+    setSaveMsg("Carregando usuários do GitHub…");
+    try {
+      const r = await fetch(GH_RAW, { cache: "no-store" });
+      const j = await r.json();
+      localStorage.setItem("users_local", JSON.stringify(j));
+      setSaveMsg("Usuários recarregados do GitHub e salvos localmente.");
+    } catch (e: any) {
+      setSaveMsg(`Erro: ${e?.message || e}`);
+    }
+  }
+
+  async function salvarNoGh() {
+    setSaveMsg("Lendo local e publicando no GitHub…");
+    try {
+      const local = localStorage.getItem("users_local");
+      const arr = local ? JSON.parse(local) : [];
+      await ghPutJson(GH_USERS_PATH, arr);
+      setSaveMsg("Publicado com sucesso no GitHub.");
+    } catch (e: any) {
+      setSaveMsg(`Erro: ${e?.message || e}`);
+    }
+  }
+
+  return (
+    <div className="rounded-2xl bg-white shadow border p-3">
+      <div className="font-semibold mb-2">Admin — Gerenciar usuários</div>
+      <div className="text-sm text-slate-600 mb-2">
+        Repositório: <code>{GH_OWNER}/{GH_REPO}</code> — arquivo: <code>{GH_USERS_PATH}</code>
+      </div>
+      <div className="flex flex-wrap gap-2 items-center">
+        <input
+          className="w-[380px] max-w-full rounded-lg border px-3 py-2"
+          type="password"
+          placeholder="Personal Access Token (repo contents:read/write)"
+          value={pat}
+          onChange={(e) => {
+            setPat(e.target.value);
+            localStorage.setItem("gh_pat", e.target.value);
+          }}
+        />
+        <button className="rounded-lg bg-slate-800 text-white px-3 py-2" onClick={recarregarDoGh}>
+          Recarregar do GitHub
+        </button>
+        <button className="rounded-lg bg-emerald-600 text-white px-3 py-2" onClick={salvarNoGh}>
+          Salvar usuários no GitHub
+        </button>
+      </div>
+      {!!saveMsg && <div className="mt-2 text-sm">{saveMsg}</div>}
+    </div>
+  );
+};
+
+export default App;
