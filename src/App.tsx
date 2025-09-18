@@ -1032,7 +1032,6 @@ const AdminBox: React.FC = () => {
       {!!saveMsg && <div className="mt-2 text-sm">{saveMsg}</div>}
     </div>
   );
-   
 };
 
 export default App;
