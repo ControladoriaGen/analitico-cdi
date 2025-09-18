@@ -1,524 +1,611 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
-/* ===================== CONFIG ===================== */
-// Link do Excel (SharePoint) – sempre com cache-buster
-const XLSX_URL =
+/** ===========================
+ *  CONFIG
+ *  =========================== */
+const SHAREPOINT_XLSX =
   "https://generosocombr-my.sharepoint.com/personal/controladoria_generoso_com_br/_layouts/15/download.aspx?share=ESLYowVkuEBEu82Jfnk-JQ0BfoDxwkd99RFtXTEzbARXEg&download=1";
 
-const SHEET_NAMES_TRY = ["CDIAutomtico1", "CDIAutomático1", "CDI Automático 1"];
+type Perfil = "admin" | "user";
+type Usuario = { user: string; pass: string; perfil: Perfil; unidade?: string | "*" };
 
-// Nomes de colunas (exatamente como estão na planilha)
-const COL = {
-  data: "Custo de Distribuição[Data Baixa]",
-  placa: "Custo de Distribuição[Placa]",
-  tipo: "Custo de Distribuição[Tipo]",
-  unidade: "Custo de Distribuição[Unidade]",
-  rel: "Custo de Distribuição[Relacionamento]",
-
-  receita: "SumReceita_Líquida",
-  custoTotal: "SumDiária_Total",
-
-  peso: "SumPeso",
-  volumes: "SumVolumes",
-  ctrcs: "SumCTRC_s",
-  coletas: "SumColetas",
-  entregas: "SumEntregas",
-  valorMerc: "SumValor_de_Mercadoria",
-  retorno: "SumRetorno",
-  cdiPct: "SumCDI",
-  cdiPct2: "CDI____",
-} as const;
-
-// Tipos de custo (apenas custos – sem receita/produção/retorno)
-const COST_KEYS: Array<{ key: string; label: string }> = [
-  { key: "SumAjudante", label: "Ajudante" },
-  { key: "SumComissão_de_Recepção", label: "Comissão de Recepção" },
-  { key: "SumDesconto_de_Coleta", label: "Desconto de Coleta" },
-  { key: "SumDiária_Fixa", label: "Diária Fixa" },
-  { key: "SumDiária_Manual", label: "Diária Manual" },
-  { key: "SumDiária_Percentual", label: "Diária Percentual" },
-  { key: "SumEvento", label: "Evento" },
-  { key: "SumGurgelmix", label: "Gurgelmix" },
-  { key: "SumHerbalife", label: "Herbalife" },
-  { key: "SumSaída", label: "Saída" },
-  { key: "SumSetor_400", label: "Setor 400" },
-  { key: "SumCusto_Fixo__Frota", label: "Custo Fixo Frota" },
-  { key: "SumCusto_Variável__Frota", label: "Custo Variável Frota" },
-  { key: "SumSal___Enc___Frota", label: "Salário/Encargos Frota" },
-  { key: "SumH_E__Frota", label: "H.E. Frota" },
-];
-
-// Tema TG (claro)
-const THEME = {
-  blue: "#0a2d8d",
-  blue2: "#0d38b0",
-  bg: "#f5f7fb",
-  card: "#ffffff",
-  text: "#0a0a0a",
-  ok: "#149c3f",
-  bad: "#db2f2f",
-  muted: "#6b7280",
+type LinhaPlaca = {
+  Data?: string | Date;
+  Unidade?: string;
+  Tipo?: string;
+  Placa?: string;
+  Peso?: number;
+  CTRCs?: number;
+  Coletas?: number;
+  Entregas?: number;
+  Receita?: number;
+  Custo?: number;
 };
 
-const GlobalStyles = () => (
-  <style>{`
-  :root{color-scheme: only light;}
-  *{box-sizing:border-box}
-  html,body,#root{height:100%}
-  body{margin:0;background:${THEME.bg};color:${THEME.text};font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial}
-  .container{max-width:1200px;margin:0 auto;padding:16px}
-  header{background:${THEME.blue};color:#fff;padding:16px 0;margin-bottom:12px}
-  h1{margin:0 0 2px 0;font-size:20px}
-  .sub{font-size:12px;opacity:.9}
-  .bar{display:flex;align-items:center;gap:8px;justify-content:flex-end}
-  .user{font-size:12px;opacity:.95;margin-right:8px}
-  .btn{background:${THEME.blue2};border:none;border-radius:8px;color:#fff;padding:10px 14px;cursor:pointer}
-  .btn.secondary{background:#e5e7eb;color:#111}
-  .btn.success{background:${THEME.ok}}
-  .btn:disabled{opacity:.6;cursor:not-allowed}
-
-  .filters{background:${THEME.blue};border-radius:10px;color:#fff;padding:14px;margin:12px 0}
-  .filters .row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:12px}
-  select{appearance:none;background:#fff;color:#111;border:1px solid #d7dce3;border-radius:8px;padding:10px;width:100%}
-  .reload{background:#fff;color:${THEME.blue};font-weight:600}
-
-  .panel{background:${THEME.card};border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,.06);padding:12px;margin:10px 0}
-  .panelTitle{background:${THEME.blue};color:#fff;padding:10px 12px;border-top-left-radius:12px;border-top-right-radius:12px;margin:-12px -12px 12px -12px;font-weight:600}
-
-  .kpis{display:grid;grid-template-columns: repeat(6,1fr);gap:12px;margin-top:10px}
-  .kpi{background:#fff;border-radius:10px;border:1px solid #e7e9ef;padding:12px}
-  .kpi .name{font-size:12px;color:${THEME.muted};margin-bottom:2px}
-  .kpi .value{font-size:20px;font-weight:700}
-  .delta{font-size:12px;margin-left:6px}
-  .up{color:${THEME.ok}} .down{color:${THEME.bad}}
-
-  table{width:100%;border-collapse:collapse}
-  th,td{padding:10px;border-bottom:1px solid #eef1f6;font-size:13px}
-  th{color:${THEME.muted};font-weight:600;text-align:left}
-  .chip{display:inline-block;padding:2px 6px;border-radius:6px;border:1px solid #e6e9f2;background:#fafbff}
-  .chip.ok{color:${THEME.ok};border-color:${THEME.ok}33}
-  .chip.bad{color:${THEME.bad};border-color:${THEME.bad}33}
-  .muted{color:${THEME.muted}}
-
-  /* LOGIN */
-  .loginWrap{min-height:100vh;display:grid;grid-template-columns:minmax(320px,420px) 1fr}
-  .loginLeft{padding:28px}
-  .loginCard{background:#fff;border-radius:12px;box-shadow:0 2px 18px rgba(0,0,0,.08);padding:18px 18px 14px}
-  .loginTitle{background:${THEME.blue};color:#fff;padding:10px 12px;border-radius:10px;margin:-18px -18px 14px -18px;font-weight:700}
-  .loginBg{position:relative;overflow:hidden}
-  .loginBg:before{
-    content:"";
-    position:absolute;inset:0;
-    background:url('https://generoso.com.br/static/7044e3eebe94961b290fb958dd42e7bc/17951/top-main-bg.webp') center left / cover no-repeat;
-    filter:brightness(.97);
-  }
-  label{display:block;font-size:12px;color:${THEME.muted};margin:8px 0 4px}
-  input{width:100%;padding:10px;border-radius:8px;border:1px solid #d7dce3;background:#fff;color:#111}
-  .loginActions{display:flex;justify-content:flex-start;margin-top:12px}
-
-  /* print */
-  @media print{
-    body{background:#fff}
-    header,.filters .reload,.btn, .loginWrap{display:none !important}
-    .panel{break-inside:avoid-page}
-    .container{max-width:none}
-  }
-`}</style>
-);
-
-/* ===================== UTILS ===================== */
-const fmtInt = (n: number) => (isFinite(n) ? Math.round(n).toLocaleString("pt-BR") : "0");
-const parseDatePt = (s: any): Date | null => {
-  if (!s && s !== 0) return null;
-  // já pode vir "16/09/2025"
-  if (typeof s === "string") {
-    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-    if (m) {
-      const d = parseInt(m[1], 10), mo = parseInt(m[2], 10) - 1, y = parseInt(m[3], 10);
-      return new Date(y < 100 ? 2000 + y : y, mo, d);
-    }
-  }
-  // serial Excel
-  if (typeof s === "number") {
-    const epoch = new Date(Date.UTC(1899, 11, 30));
-    const ms = s * 86400000;
-    return new Date(epoch.getTime() + ms);
-  }
-  return null;
+type TotUnit = {
+  Unidade: string;
+  Receita: number;
+  Custo: number;
+  Entregas: number;
+  Coletas: number;
+  CTRCs: number;
+  Peso: number;
 };
-const sameDay = (a: Date, b: Date) =>
-  a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
-type Row = Record<string, any>;
+type Sessao = { usuario: string; perfil: Perfil; unidade: string | "*" };
 
-/* ===================== LOGIN (usa users.json se existir) ===================== */
-type User = { user: string; pass: string; role: "admin" | "user"; unidade: string | "*" };
-const DEFAULT_USERS: User[] = [{ user: "gustavo", pass: "admin123", role: "admin", unidade: "*" }];
-
-async function loadUsers(): Promise<User[]> {
-  try {
-    const r = await fetch("./users.json?v=" + Date.now(), { cache: "no-store" });
-    if (r.ok) {
-      const js = await r.json();
-      if (Array.isArray(js)) return js as User[];
-    }
-  } catch {}
-  return DEFAULT_USERS;
-}
-
-/* ===================== DATA ===================== */
-async function fetchSheet(): Promise<Row[]> {
-  const url = `${XLSX_URL}&t=${Date.now()}`; // cache-buster
-  const r = await fetch(url, {
-    cache: "no-store",
-    headers: {
-      "Cache-Control": "no-cache, no-store, must-revalidate",
-      Pragma: "no-cache",
-      Expires: "0",
-    },
-  });
-  if (!r.ok) throw new Error("Falha ao baixar XLSX (" + r.status + ")");
-  const buf = await r.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array" });
-
-  let ws: XLSX.WorkSheet | undefined;
-  for (const nm of SHEET_NAMES_TRY) {
-    if (wb.Sheets[nm]) {
-      ws = wb.Sheets[nm];
-      break;
-    }
-  }
-  if (!ws) ws = wb.Sheets[wb.SheetNames[0]];
-  const rows: Row[] = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
-  // normaliza a coluna de data
-  for (const r2 of rows) {
-    const d = parseDatePt(r2[COL.data]);
-    r2.__dateObj = d;
-  }
-  return rows.filter((r) => r.__dateObj);
-}
-
-function maxDate(rows: Row[]) {
-  return rows.reduce<Date | null>((acc, r) => {
-    const d: Date = r.__dateObj;
-    if (!acc) return d;
-    return d > acc ? d : acc;
-  }, null);
-}
-function prevDate(rows: Row[], last: Date | null) {
-  let prev: Date | null = null;
-  for (const r of rows) {
-    const d: Date = r.__dateObj;
-    if (!last || sameDay(d, last)) continue;
-    if (!prev || d > prev) prev = d;
-  }
-  return prev;
-}
-
-/* ===================== APP ===================== */
-export default function App() {
-  const [users, setUsers] = useState<User[]>([]);
-  const [session, setSession] = useState<User | null>(null);
-
-  const [raw, setRaw] = useState<Row[] | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const [unid, setUnid] = useState<string>("(todos)");
-  const [tipo, setTipo] = useState<string>("(todos)");
-  const [rel, setRel] = useState<string>("(todos)");
-
-  const [last, setLast] = useState<Date | null>(null);
-  const [prev, setPrev] = useState<Date | null>(null);
-
-  // carrega usuários
+/** ===========================
+ *  ESTILO GLOBAL (tema claro + componentes)
+ *  =========================== */
+function useInjectCSS() {
   useEffect(() => {
-    loadUsers().then(setUsers);
+    const css = `
+:root { color-scheme: only light; }
+html, body, #root { height: 100%; }
+body {
+  background: #f5f7fb !important;
+  color: #1f2937;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+}
+* { box-sizing: border-box; }
+
+.app-shell {
+  min-height: 100%;
+  background: #f5f7fb;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+
+.card {
+  background: #ffffff; border-radius: 10px; box-shadow: 0 6px 18px rgba(16,24,40,.06);
+  padding: 14px;
+}
+
+.header {
+  background: #0f3a82; color: #fff;
+  padding: 16px 0;
+  position: sticky; top: 0; z-index: 10;
+  box-shadow: 0 6px 16px rgba(15,58,130,.25);
+}
+.header .container { display:flex; align-items:center; justify-content:space-between; gap: 16px; }
+.header h1 { font-size: 18px; margin:0; }
+.header small { opacity: .8; display:block; margin-top: 2px; }
+.header .who { font-size: 12px; opacity:.9; }
+
+.row { display:grid; gap:12px; }
+.row.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.row.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 8px; border-radius: 999px; background:#f1f5f9; color:#0f172a;
+}
+.badge.ok { background: #e8f8ef; color:#0e7a39; }
+.badge.warn { background: #ffefef; color:#b91c1c; }
+
+.kpi { display:flex; align-items:center; justify-content:space-between; }
+.kpi .v { font-weight: 600; font-size: 22px; }
+.kpi .l { color:#475569; font-size:13px; }
+
+select, input[type="text"], input[type="password"] {
+  width: 100%; appearance: none;
+  background: #fff; color: #0f172a;
+  border: 1px solid #d1d5db; border-radius: 8px;
+  height: 36px; padding: 0 12px;
+  outline: none;
+}
+select:focus, input:focus { border-color: #0f3a82; box-shadow: 0 0 0 3px rgba(15,58,130,.15); }
+
+.btn {
+  height: 36px; border-radius: 8px; padding: 0 14px; border: 0; cursor: pointer;
+  background:#0f3a82; color:#fff; font-weight: 600;
+  box-shadow: 0 8px 16px rgba(15,58,130,.24);
+}
+.btn:disabled { opacity: .6; cursor: not-allowed; }
+.btn.secondary { background:#0ea5e9; }
+.btn.ghost { background:#fff; color:#0f3a82; border:1px solid #cbd5e1; }
+
+.table { width:100%; border-collapse: collapse; }
+.table th, .table td { font-size: 13px; padding: 10px 8px; border-bottom:1px solid #eef2f7; }
+.table th { text-align:left; background:#0f3a82; color:#fff; position: sticky; top: 62px; z-index: 5; }
+
+.section-title { background:#0f3a82; color:#fff; padding: 10px 12px; border-radius: 10px 10px 0 0; font-weight: 600; }
+
+.login-wrap {
+  min-height: 100svh;
+  display: grid; grid-template-columns: 420px 1fr;
+  align-items: stretch;
+}
+.login-left {
+  padding: 28px;
+  display:flex; align-items:flex-start; justify-content:center;
+}
+.login-card { width: 100%; max-width: 360px; }
+
+.login-bg {
+  min-height: 100%;
+  background-image: url('https://generoso.com.br/static/7044e3eebe94961b290fb958dd42e7bc/17951/top-main-bg.webp');
+  background-size: cover; background-position: center center;
+  filter: saturate(.95);
+}
+
+.footer-gap { height: 24px; }
+    `;
+    const el = document.createElement("style");
+    el.id = "force-light-css";
+    el.textContent = css;
+    document.head.appendChild(el);
+    return () => el.remove();
+  }, []);
+}
+
+/** ===========================
+ *  UTILS
+ *  =========================== */
+const fmt = new Intl.NumberFormat("pt-BR");
+const fmtKg = (v: number) => (isFinite(v) ? fmt.format(v) : "0");
+const fmtMoeda = (v: number) =>
+  isFinite(v) ? "R$ " + fmt.format(v) : "R$ 0";
+
+function pickNumber(row: any, keys: string[]): number {
+  for (const k of keys) {
+    if (row[k] == null) continue;
+    const v = Number(
+      String(row[k]).replace(/\./g, "").replace(",", ".").replace(/\s/g, "")
+    );
+    if (!isNaN(v)) return v;
+  }
+  return 0;
+}
+
+function pickString(row: any, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = row[k];
+    if (v != null && String(v).trim() !== "") return String(v).trim();
+  }
+  return undefined;
+}
+
+function pickDate(row: any, keys: string[]): Date | undefined {
+  for (const k of keys) {
+    const v = row[k];
+    if (v == null || v === "") continue;
+    if (v instanceof Date) return v;
+    // Excel date serial
+    const n = Number(v);
+    if (!isNaN(n) && n > 25000 && n < 80000) {
+      return XLSX.SSF.parse_date_code(n)
+        ? new Date(
+            Date.UTC(
+              XLSX.SSF.parse_date_code(n)!.y,
+              (XLSX.SSF.parse_date_code(n)!.m || 1) - 1,
+              XLSX.SSF.parse_date_code(n)!.d || 1
+            )
+          )
+        : undefined;
+    }
+    // String date
+    const d = new Date(String(v));
+    if (!isNaN(d.getTime())) return d;
+  }
+  return undefined;
+}
+
+/** ===========================
+ *  XLSX → dados
+ *  =========================== */
+async function fetchPlanilha(): Promise<{
+  porPlaca: LinhaPlaca[];
+  lastDate?: Date;
+}> {
+  // cache-busting + no-store
+  const url = SHAREPOINT_XLSX + (SHAREPOINT_XLSX.includes("?") ? "&" : "?") + "ts=" + Date.now();
+
+  const resp = await fetch(url, {
+    cache: "no-store",
+    headers: { "Cache-Control": "no-cache, no-store, must-revalidate", Pragma: "no-cache" },
+  });
+  if (!resp.ok) throw new Error(`Falha ao baixar XLSX (${resp.status})`);
+  const ab = await resp.arrayBuffer();
+  const wb = XLSX.read(ab, { type: "array" });
+
+  // Procura a aba com colunas de placa (Unidade/Tipo/Placa são obrigatórias)
+  let sheetName = wb.SheetNames.find((n) => {
+    const ws = wb.Sheets[n];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true }) as any[][];
+    if (!rows.length) return false;
+    const head = (rows[0] || []).map((h: any) => String(h || "").toLowerCase());
+    return (
+      head.some((h) => h.includes("unidade")) &&
+      head.some((h) => h.includes("tipo")) &&
+      head.some((h) => h.includes("placa"))
+    );
+  });
+  if (!sheetName) {
+    // fallback: primeira
+    sheetName = wb.SheetNames[0];
+  }
+
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { raw: true }) as any[];
+
+  // Normaliza por cabeçalhos conhecidos
+  const porPlaca: LinhaPlaca[] = rows.map((r) => {
+    const Data = pickDate(r, ["Data", "data", "Dia", "DT", "dt"]);
+    const Unidade = pickString(r, ["Unidade", "unidade", "Filial", "filial"]);
+    const Tipo = pickString(r, ["Tipo", "tipo", "Tipo de Veículo", "Veículo"]);
+    const Placa = pickString(r, ["Placa", "placa", "Placa Veículo"]);
+    const Peso = pickNumber(r, ["Peso", "Peso (kg)", "peso", "kg"]);
+    const CTRCs = pickNumber(r, ["CTRCs", "CTRC", "ctrcs", "Notas", "Qtd CTRCs"]);
+    const Coletas = pickNumber(r, ["Coletas", "coletas"]);
+    const Entregas = pickNumber(r, ["Entregas", "entregas"]);
+    const Receita = pickNumber(r, ["Receita", "receita", "Faturamento", "Valor Receita"]);
+    const Custo = pickNumber(r, ["Custo", "custo", "Custo Total", "Total Custos"]);
+
+    return { Data, Unidade, Tipo, Placa, Peso, CTRCs, Coletas, Entregas, Receita, Custo };
+  });
+
+  const lastDate = porPlaca
+    .map((l) => (l.Data ? new Date(l.Data) : undefined))
+    .filter(Boolean)
+    .sort((a: any, b: any) => +b - +a)[0];
+
+  return { porPlaca, lastDate };
+}
+
+/** ===========================
+ *  APP
+ *  =========================== */
+export default function App() {
+  useInjectCSS();
+
+  const [sessao, setSessao] = useState<Sessao | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [porPlaca, setPorPlaca] = useState<LinhaPlaca[]>([]);
+  const [lastDate, setLastDate] = useState<Date | undefined>(undefined);
+
+  // Filtros
+  const [fUn, setFUn] = useState<string>("(todos)");
+  const [fTipo, setFTipo] = useState<string>("(todos)");
+  const [fRel, setFRel] = useState<string>("(todos)");
+
+  /** ======= Login mínimo (com 1 admin padrão local) ======= */
+  const usuariosPadrao: Usuario[] = [
+    { user: "gustavo", pass: "123456", perfil: "admin", unidade: "*" },
+  ];
+  useEffect(() => {
+    // mantém login anterior
+    const raw = localStorage.getItem("sessao");
+    if (raw) setSessao(JSON.parse(raw));
   }, []);
 
-  // login simples
-  const [u, setU] = useState("gustavo");
-  const [p, setP] = useState("");
-
-  const tryLogin = () => {
-    const found = users.find((x) => x.user.toLowerCase() === u.toLowerCase() && x.pass === p);
-    if (!found) {
-      alert("Usuário ou senha inválidos.");
+  function doLogin(u: string, p: string) {
+    const users: Usuario[] = usuariosPadrao; // (persistência já está ok no seu projeto)
+    const hit = users.find((x) => x.user.toLowerCase() === u.toLowerCase() && x.pass === p);
+    if (!hit) {
+      alert("Usuário não encontrado");
       return;
     }
-    setSession(found);
-  };
+    const s: Sessao = { usuario: hit.user, perfil: hit.perfil, unidade: hit.unidade || "*" };
+    setSessao(s);
+    localStorage.setItem("sessao", JSON.stringify(s));
+  }
+  function logout() {
+    setSessao(null);
+    localStorage.removeItem("sessao");
+  }
 
-  // carrega dados
-  const load = async () => {
+  /** ======= Carregar XLSX (sempre sem cache) ======= */
+  async function recarregar() {
     try {
       setLoading(true);
-      const rows = await fetchSheet();
-      const l = maxDate(rows);
-      const pr = prevDate(rows, l);
-      setRaw(rows);
-      setLast(l);
-      setPrev(pr);
+      const { porPlaca: linhas, lastDate } = await fetchPlanilha();
+      setPorPlaca(linhas);
+      setLastDate(lastDate);
     } catch (e: any) {
-      alert(e?.message || "Erro ao carregar dados.");
+      console.error(e);
+      alert("Falha ao recarregar planilha: " + e.message);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
   useEffect(() => {
-    if (session) load();
-  }, [session]);
+    if (sessao) recarregar();
+  }, [sessao]);
 
-  /* ======== filtros derivados ======== */
-  const allUnid = useMemo(() => {
-    if (!raw) return [];
-    const s = new Set<string>();
-    raw.forEach((r) => s.add(r[COL.unidade]));
-    return ["(todos)", ...Array.from(s).sort()];
-  }, [raw]);
-  const allTipo = useMemo(() => {
-    if (!raw) return [];
-    const s = new Set<string>();
-    raw.forEach((r) => s.add(r[COL.tipo]));
-    return ["(todos)", ...Array.from(s).sort()];
-  }, [raw]);
-  const allRel = useMemo(() => {
-    if (!raw) return [];
-    const s = new Set<string>();
-    raw.forEach((r) => s.add(r[COL.rel]));
-    return ["(todos)", ...Array.from(s).sort()];
-  }, [raw]);
+  /** ======= Domínios de filtro ======= */
+  const domUnidades = useMemo(() => {
+    const set = new Set<string>();
+    porPlaca.forEach((r) => r.Unidade && set.add(r.Unidade));
+    return ["(todos)", ...Array.from(set).sort()];
+  }, [porPlaca]);
 
-  const filteredForDate = (d: Date | null) => {
-    if (!raw || !d) return [];
-    return raw.filter((r) => {
-      if (!sameDay(r.__dateObj, d)) return false;
-      if (unid !== "(todos)" && r[COL.unidade] !== unid) return false;
-      if (tipo !== "(todos)" && r[COL.tipo] !== tipo) return false;
-      if (rel !== "(todos)" && r[COL.rel] !== rel) return false;
+  const domTipos = useMemo(() => {
+    const set = new Set<string>();
+    porPlaca.forEach((r) => r.Tipo && set.add(r.Tipo));
+    return ["(todos)", ...Array.from(set).sort()];
+  }, [porPlaca]);
+
+  const domRel = ["(todos)"]; // reservado – mantém layout
+
+  /** ======= Dados filtrados ======= */
+  const filtrado = useMemo(() => {
+    return porPlaca.filter((r) => {
+      if (fUn !== "(todos)" && r.Unidade !== fUn) return false;
+      if (fTipo !== "(todos)" && r.Tipo !== fTipo) return false;
+      if (fRel !== "(todos)") {
+        // placeholder
+      }
+      if (sessao?.unidade && sessao.unidade !== "*" && r.Unidade !== sessao.unidade) return false;
       return true;
     });
-  };
+  }, [porPlaca, fUn, fTipo, fRel, sessao]);
 
-  const rowsLast = useMemo(() => filteredForDate(last), [raw, last, unid, tipo, rel]);
-  const rowsPrev = useMemo(() => filteredForDate(prev), [raw, prev, unid, tipo, rel]);
-
-  // agregadores
-  const sum = (rows: Row[], col: string) =>
-    rows.reduce((acc, r) => acc + (Number(r[col]) || 0), 0);
-
-  const kpis = useMemo(() => {
-    const receita = sum(rowsLast, COL.receita);
-    const custo = sum(rowsLast, COL.custoTotal);
-    const entregas = sum(rowsLast, COL.entregas);
-    const coletas = sum(rowsLast, COL.coletas);
-    const ctrcs = sum(rowsLast, COL.ctrcs);
-    const peso = sum(rowsLast, COL.peso);
-
-    const receitaP = sum(rowsPrev, COL.receita);
-    const custoP = sum(rowsPrev, COL.custoTotal);
-    const entregasP = sum(rowsPrev, COL.entregas);
-    const coletasP = sum(rowsPrev, COL.coletas);
-    const ctrcsP = sum(rowsPrev, COL.ctrcs);
-    const pesoP = sum(rowsPrev, COL.peso);
-
-    return {
-      receita: { v: receita, d: receita - receitaP },
-      custo: { v: custo, d: custo - custoP },
-      entregas: { v: entregas, d: entregas - entregasP },
-      coletas: { v: coletas, d: coletas - coletasP },
-      ctrcs: { v: ctrcs, d: ctrcs - ctrcsP },
-      peso: { v: peso, d: peso - pesoP },
-    };
-  }, [rowsLast, rowsPrev]);
-
-  // por unidade (quando filtro = (todos))
-  const porUnidade = useMemo(() => {
-    const rows = rowsLast;
-    const map = new Map<string, { receita: number; custo: number; entregas: number; coletas: number; ctrcs: number; peso: number }>();
-    for (const r of rows) {
-      const u = r[COL.unidade] || "-";
-      const it = map.get(u) || { receita: 0, custo: 0, entregas: 0, coletas: 0, ctrcs: 0, peso: 0 };
-      it.receita += Number(r[COL.receita]) || 0;
-      it.custo += Number(r[COL.custoTotal]) || 0;
-      it.entregas += Number(r[COL.entregas]) || 0;
-      it.coletas += Number(r[COL.coletas]) || 0;
-      it.ctrcs += Number(r[COL.ctrcs]) || 0;
-      it.peso += Number(r[COL.peso]) || 0;
-      map.set(u, it);
+  /** ======= Agregações ======= */
+  const resumoGeral = useMemo(() => {
+    const base: TotUnit[] = [];
+    const idx = new Map<string, number>();
+    function add(u: string, inc: Partial<TotUnit>) {
+      if (!idx.has(u)) {
+        idx.set(u, base.length);
+        base.push({ Unidade: u, Receita: 0, Custo: 0, Entregas: 0, Coletas: 0, CTRCs: 0, Peso: 0 });
+      }
+      const i = idx.get(u)!;
+      base[i].Receita += inc.Receita || 0;
+      base[i].Custo += inc.Custo || 0;
+      base[i].Entregas += inc.Entregas || 0;
+      base[i].Coletas += inc.Coletas || 0;
+      base[i].CTRCs += inc.CTRCs || 0;
+      base[i].Peso += inc.Peso || 0;
     }
-    return Array.from(map.entries()).map(([u, v]) => ({ unidade: u, ...v }));
-  }, [rowsLast]);
+    filtrado.forEach((r) => {
+      const u = r.Unidade || "-";
+      add(u, {
+        Receita: r.Receita || 0,
+        Custo: r.Custo || 0,
+        Entregas: r.Entregas || 0,
+        Coletas: r.Coletas || 0,
+        CTRCs: r.CTRCs || 0,
+        Peso: r.Peso || 0,
+      });
+    });
+    base.sort((a, b) => a.Unidade.localeCompare(b.Unidade));
+    const total = base.reduce(
+      (acc, x) => ({
+        Receita: acc.Receita + x.Receita,
+        Custo: acc.Custo + x.Custo,
+        Entregas: acc.Entregas + x.Entregas,
+        Coletas: acc.Coletas + x.Coletas,
+        CTRCs: acc.CTRCs + x.CTRCs,
+        Peso: acc.Peso + x.Peso,
+      }),
+      { Receita: 0, Custo: 0, Entregas: 0, Coletas: 0, CTRCs: 0, Peso: 0 }
+    );
+    return { linhas: base, total };
+  }, [filtrado]);
 
-  // por tipo/unidade média & linhas de placa
-  const placaTable = useMemo(() => {
-    const rows = rowsLast;
-    // média por (unidade,tipo)
-    const key = (r: Row) => `${r[COL.unidade]}||${r[COL.tipo]}`;
-    const aggr = new Map<string, { n: number; peso: number; ctrcs: number; coletas: number; entregas: number }>();
-    for (const r of rows) {
-      const k = key(r);
-      const it = aggr.get(k) || { n: 0, peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
-      it.n++;
-      it.peso += Number(r[COL.peso]) || 0;
-      it.ctrcs += Number(r[COL.ctrcs]) || 0;
-      it.coletas += Number(r[COL.coletas]) || 0;
-      it.entregas += Number(r[COL.entregas]) || 0;
-      aggr.set(k, it);
+  /** ======= Sinalização por placa (vs média por tipo/unidade) ======= */
+  const placaSinal = useMemo(() => {
+    // médias por (Unidade, Tipo)
+    const grp = new Map<string, { Peso: number; CTRCs: number; Coletas: number; Entregas: number; n: number }>();
+    filtrado.forEach((r) => {
+      const key = (r.Unidade || "-") + "||" + (r.Tipo || "-");
+      if (!grp.has(key)) grp.set(key, { Peso: 0, CTRCs: 0, Coletas: 0, Entregas: 0, n: 0 });
+      const g = grp.get(key)!;
+      g.Peso += r.Peso || 0;
+      g.CTRCs += r.CTRCs || 0;
+      g.Coletas += r.Coletas || 0;
+      g.Entregas += r.Entregas || 0;
+      g.n += 1;
+    });
+    const medias = new Map<string, { Peso: number; CTRCs: number; Coletas: number; Entregas: number }>();
+    grp.forEach((g, k) =>
+      medias.set(k, {
+        Peso: g.n ? g.Peso / g.n : 0,
+        CTRCs: g.n ? g.CTRCs / g.n : 0,
+        Coletas: g.n ? g.Coletas / g.n : 0,
+        Entregas: g.n ? g.Entregas / g.n : 0,
+      })
+    );
+
+    function flag(v: number, m: number) {
+      if (m === 0 && v === 0) return { txt: "= = média", cls: "badge" };
+      if (v > m) return { txt: "▲ acima", cls: "badge ok" };
+      if (v < m) return { txt: "▼ abaixo", cls: "badge warn" };
+      return { txt: "= = média", cls: "badge" };
     }
-    const avg = (k: string) => {
-      const it = aggr.get(k);
-      if (!it || !it.n) return { peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
+
+    return filtrado.map((r) => {
+      const key = (r.Unidade || "-") + "||" + (r.Tipo || "-");
+      const m = medias.get(key) || { Peso: 0, CTRCs: 0, Coletas: 0, Entregas: 0 };
       return {
-        peso: it.peso / it.n,
-        ctrcs: it.ctrcs / it.n,
-        coletas: it.coletas / it.n,
-        entregas: it.entregas / it.n,
-      };
-    };
-    // linhas
-    return rows.map((r) => {
-      const k = key(r);
-      const m = avg(k);
-      const peso = Number(r[COL.peso]) || 0;
-      const ctrcs = Number(r[COL.ctrcs]) || 0;
-      const coletas = Number(r[COL.coletas]) || 0;
-      const entregas = Number(r[COL.entregas]) || 0;
-      const flag = (v: number, base: number) =>
-        v > base ? { dir: "▲", cls: "ok", txt: "acima" } : v < base ? { dir: "▼", cls: "bad", txt: "abaixo" } : { dir: "=", cls: "", txt: " = média" };
-      return {
-        unidade: r[COL.unidade],
-        tipo: r[COL.tipo],
-        placa: r[COL.placa],
-        peso: { v: peso, ...flag(peso, m.peso) },
-        ctrcs: { v: ctrcs, ...flag(ctrcs, m.ctrcs) },
-        coletas: { v: coletas, ...flag(coletas, m.coletas) },
-        entregas: { v: entregas, ...flag(entregas, m.entregas) },
+        ...r,
+        flagPeso: flag(r.Peso || 0, m.Peso),
+        flagCT: flag(r.CTRCs || 0, m.CTRCs),
+        flagColeta: flag(r.Coletas || 0, m.Coletas),
+        flagEnt: flag(r.Entregas || 0, m.Entregas),
       };
     });
-  }, [rowsLast]);
+  }, [filtrado]);
 
-  // decomposição de custos + produção por tipo de custo
-  const decomp = useMemo(() => {
-    const total = sum(rowsLast, COL.custoTotal);
-    const linhas = COST_KEYS.map(({ key, label }) => {
-      const valor = sum(rowsLast, key);
-      // produção agregada (veículos onde esse custo >0)
-      let prod = { ctrcs: 0, coletas: 0, entregas: 0, peso: 0 };
-      for (const r of rowsLast) {
-        if ((Number(r[key]) || 0) > 0) {
-          prod.ctrcs += Number(r[COL.ctrcs]) || 0;
-          prod.coletas += Number(r[COL.coletas]) || 0;
-          prod.entregas += Number(r[COL.entregas]) || 0;
-          prod.peso += Number(r[COL.peso]) || 0;
-        }
-      }
-      return { label, valor, pct: total ? (valor / total) * 100 : 0, ...prod };
-    }).filter((l) => l.valor > 0.0001);
-    return { total, linhas };
-  }, [rowsLast]);
+  /** ======= Exportar PDF ======= */
+  async function exportarPDF() {
+    // usa print nativo – com CSS limpo fica apresentável
+    window.print();
+  }
 
-  const dateStr = (d: Date | null) =>
-    d ? new Intl.DateTimeFormat("pt-BR").format(d) : "-";
+  /** ======= Texto automático ======= */
+  const analiseTxt = useMemo(() => {
+    const dt = lastDate ? lastDate : undefined;
+    const un = fUn !== "(todos)" ? fUn : "todas";
+    const t = resumoGeral.total;
+    const pontos: string[] = [];
+    // destaques simples
+    const maiorCusto = resumoGeral.linhas
+      .slice()
+      .sort((a, b) => b.Custo - a.Custo)[0];
+    if (maiorCusto) pontos.push(`custo mais alto: ${maiorCusto.Unidade} (${fmtMoeda(maiorCusto.Custo)})`);
+    return `Unidade: ${un}. Dia ${dt ? dt.toLocaleDateString("pt-BR") : "(arquivo)"}.
+Receita ${fmtMoeda(t.Receita)}, custo ${fmtMoeda(t.Custo)}, entregas ${fmt.format(
+      t.Entregas
+    )}, coletas ${fmt.format(t.Coletas)}, CTRCs ${fmt.format(t.CTRCs)}, peso ${fmtKg(t.Peso)}.
+Pontos de atenção: ${pontos.join("; ") || "—"}.`;
+  }, [resumoGeral, fUn, lastDate]);
 
-  const onPrint = () => window.print();
-
-  /* ===================== RENDER ===================== */
-  if (!session) {
+  /** ===========================
+   *  RENDER
+   *  =========================== */
+  if (!sessao) {
+    let u = "gustavo";
+    let p = "";
     return (
-      <>
-        <GlobalStyles />
-        <div className="loginWrap">
-          <div className="loginLeft">
-            <div className="loginCard">
-              <div className="loginTitle">CDI – Análise Diária</div>
-              <div className="muted" style={{ marginBottom: 8 }}>
+      <div className="app-shell">
+        <div className="login-wrap">
+          <div className="login-left">
+            <div className="card login-card">
+              <div className="section-title">CDI – Análise Diária</div>
+              <div style={{ fontSize: 12, color: "#475569", marginTop: 6, marginBottom: 10 }}>
                 Transporte Generoso – Controladoria
               </div>
-              <label>Usuário</label>
-              <input value={u} onChange={(e) => setU(e.target.value)} placeholder="usuário" />
-              <label>Senha</label>
-              <input value={p} onChange={(e) => setP(e.target.value)} placeholder="senha" type="password" />
-              <div className="loginActions">
-                <button className="btn" onClick={tryLogin}>Entrar</button>
+              <div style={{ display: "grid", gap: 8 }}>
+                <div>
+                  <label style={{ fontSize: 12, color: "#475569" }}>Usuário</label>
+                  <input
+                    defaultValue={u}
+                    onChange={(e) => (u = e.target.value)}
+                    type="text"
+                    placeholder="usuário"
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, color: "#475569" }}>Senha</label>
+                  <input
+                    onChange={(e) => (p = e.target.value)}
+                    type="password"
+                    placeholder="senha"
+                  />
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                  <button className="btn" onClick={() => doLogin(u, p)}>
+                    Entrar
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-          <div className="loginBg" />
+          <div className="login-bg" />
         </div>
-      </>
+      </div>
     );
   }
 
-  const k = kpis;
-
   return (
-    <>
-      <GlobalStyles />
-      <header>
-        <div className="container" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+    <div className="app-shell">
+      {/* HEADER */}
+      <div className="header">
+        <div className="container">
           <div>
             <h1>CDI – Análise Diária</h1>
-            <div className="sub">Transporte Generoso – Controladoria</div>
-            <div className="sub">Último dia do arquivo: {dateStr(last)}</div>
+            <small>Transporte Generoso – Controladoria</small>
+            <small>
+              Último dia do arquivo:{" "}
+              {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"}
+            </small>
           </div>
-          <div className="bar">
-            <div className="user">{session.user} ({session.role})</div>
-            <button className="btn secondary" onClick={() => setSession(null)}>Sair</button>
+          <div className="who">
+            {sessao.usuario} ({sessao.perfil}){" "}
+            <button className="btn ghost" onClick={logout} style={{ marginLeft: 8 }}>
+              Sair
+            </button>
           </div>
         </div>
-      </header>
+      </div>
 
-      <div className="container" style={{ minHeight: "100vh" }}>
-        <div className="filters">
-          <div className="row">
-            <select value={unid} onChange={(e) => setUnid(e.target.value)}>
-              {allUnid.map((x) => <option key={x} value={x}>{x}</option>)}
+      {/* BODY */}
+      <div className="container" style={{ marginTop: 14 }}>
+        {/* FILTROS */}
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="row cols-3">
+            <select value={fUn} onChange={(e) => setFUn(e.target.value)}>
+              {domUnidades.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
             </select>
-            <select value={tipo} onChange={(e) => setTipo(e.target.value)}>
-              {allTipo.map((x) => <option key={x} value={x}>{x}</option>)}
+            <select value={fTipo} onChange={(e) => setFTipo(e.target.value)}>
+              {domTipos.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
             </select>
-            <select value={rel} onChange={(e) => setRel(e.target.value)}>
-              {allRel.map((x) => <option key={x} value={x}>{x}</option>)}
-            </select>
-            <div style={{ display:"flex", gap:8 }}>
-              <button className="btn reload" onClick={load} disabled={loading}>{loading ? "Carregando..." : "Recarregar"}</button>
-              <button className="btn success" onClick={onPrint}>Exportar PDF</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <select value={fRel} onChange={(e) => setFRel(e.target.value)} style={{ flex: 1 }}>
+                {domRel.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+              <button className="btn" onClick={recarregar} disabled={loading}>
+                {loading ? "Carregando..." : "Recarregar"}
+              </button>
+              <button className="btn secondary" onClick={exportarPDF}>
+                Exportar PDF
+              </button>
             </div>
           </div>
         </div>
 
-        <div className="panel">
-          <div className="panelTitle">Resumo do Dia</div>
-          <div className="muted" style={{ marginBottom: 8 }}>
-            Resumo do dia {dateStr(last)} — Unidades: {unid}.
+        {/* RESUMO */}
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 10, color: "#334155" }}>
+            Resumo do dia {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"} — Unidades:{" "}
+            {fUn !== "(todos)" ? fUn : "(todas)"}.
           </div>
-          <div className="kpis">
-            {[
-              { name: "Receita", obj: k.receita },
-              { name: "Custo", obj: k.custo },
-              { name: "Entregas", obj: k.entregas },
-              { name: "Coletas", obj: k.coletas },
-              { name: "CTRCs", obj: k.ctrcs },
-              { name: "Peso (kg)", obj: k.peso },
-            ].map(({ name, obj }) => {
-              const cls = obj.d > 0 ? "up" : obj.d < 0 ? "down" : "";
-              const sym = obj.d > 0 ? "▲" : obj.d < 0 ? "▼" : "•";
-              return (
-                <div className="kpi" key={name}>
-                  <div className="name">{name}</div>
-                  <div className="value">
-                    {fmtInt(obj.v)}
-                    <span className={`delta ${cls}`}> {sym} {fmtInt(Math.abs(obj.d))}</span>
-                  </div>
-                </div>
-              );
-            })}
+          <div className="row cols-3">
+            <div className="card">
+              <div className="kpi">
+                <div className="l">Receita</div>
+                <div className="v">{fmtMoeda(resumoGeral.total.Receita)}</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="kpi">
+                <div className="l">Custo</div>
+                <div className="v">{fmtMoeda(resumoGeral.total.Custo)}</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="kpi">
+                <div className="l">Entregas</div>
+                <div className="v">{fmt.format(resumoGeral.total.Entregas)}</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="kpi">
+                <div className="l">Coletas</div>
+                <div className="v">{fmt.format(resumoGeral.total.Coletas)}</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="kpi">
+                <div className="l">CTRCs</div>
+                <div className="v">{fmt.format(resumoGeral.total.CTRCs)}</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="kpi">
+                <div className="l">Peso (kg)</div>
+                <div className="v">{fmtKg(resumoGeral.total.Peso)}</div>
+              </div>
+            </div>
           </div>
 
-          {/* Tabela por unidade (quando (todos)) */}
           <div style={{ marginTop: 12 }}>
-            <table>
+            <table className="table">
               <thead>
                 <tr>
                   <th>Unidade</th>
@@ -531,15 +618,15 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {(unid === "(todos)" ? porUnidade : porUnidade.filter((r) => r.unidade === unid)).map((r) => (
-                  <tr key={r.unidade}>
-                    <td>{r.unidade}</td>
-                    <td>{fmtInt(r.receita)}</td>
-                    <td>{fmtInt(r.custo)}</td>
-                    <td>{fmtInt(r.entregas)}</td>
-                    <td>{fmtInt(r.coletas)}</td>
-                    <td>{fmtInt(r.ctrcs)}</td>
-                    <td>{fmtInt(r.peso)}</td>
+                {resumoGeral.linhas.map((l) => (
+                  <tr key={l.Unidade}>
+                    <td>{l.Unidade}</td>
+                    <td>{fmtMoeda(l.Receita)}</td>
+                    <td>{fmtMoeda(l.Custo)}</td>
+                    <td>{fmt.format(l.Entregas)}</td>
+                    <td>{fmt.format(l.Coletas)}</td>
+                    <td>{fmt.format(l.CTRCs)}</td>
+                    <td>{fmtKg(l.Peso)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -547,92 +634,123 @@ export default function App() {
           </div>
         </div>
 
-        {/* placa vs média do tipo/unidade */}
-        <div className="panel">
-          <div className="panelTitle">Por Tipo de Veículo → Placa (sinalização vs. média do tipo na unidade)</div>
-          <table>
-            <thead>
-              <tr>
-                <th>Unidade</th><th>Tipo</th><th>Placa</th>
-                <th>Peso</th><th>CTRCs</th><th>Coletas</th><th>Entregas</th>
-              </tr>
-            </thead>
-            <tbody>
-              {placaTable.map((r, i) => (
-                <tr key={r.placa + i}>
-                  <td>{r.unidade}</td>
-                  <td>{r.tipo}</td>
-                  <td>{r.placa}</td>
-                  <td>
-                    {fmtInt(r.peso.v)}{" "}
-                    <span className={`chip ${r.peso.cls}`}>{r.peso.dir} {r.peso.txt}</span>
-                  </td>
-                  <td>
-                    {fmtInt(r.ctrcs.v)}{" "}
-                    <span className={`chip ${r.ctrcs.cls}`}>{r.ctrcs.dir} {r.ctrcs.txt}</span>
-                  </td>
-                  <td>
-                    {fmtInt(r.coletas.v)}{" "}
-                    <span className={`chip ${r.coletas.cls}`}>{r.coletas.dir} {r.coletas.txt}</span>
-                  </td>
-                  <td>
-                    {fmtInt(r.entregas.v)}{" "}
-                    <span className={`chip ${r.entregas.cls}`}>{r.entregas.dir} {r.entregas.txt}</span>
-                  </td>
+        {/* PLACAS */}
+        <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
+          <div className="section-title">
+            Por Tipo de Veículo → Placa (sinalização vs. média do tipo na unidade)
+          </div>
+          <div style={{ padding: 12 }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Unidade</th>
+                  <th>Tipo</th>
+                  <th>Placa</th>
+                  <th>Peso</th>
+                  <th>CTRCs</th>
+                  <th>Coletas</th>
+                  <th>Entregas</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Decomposição de custos */}
-        <div className="panel">
-          <div className="panelTitle">Decomposição de tipos de custo + produção do dia (por tipo de custo)</div>
-          <table>
-            <thead>
-              <tr>
-                <th>Tipo de custo</th><th>Valor</th><th>% do total</th>
-                <th>CTRCs</th><th>Coletas</th><th>Entregas</th><th>Peso (kg)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {decomp.linhas.map((l, i) => (
-                <tr key={l.label + i}>
-                  <td>{l.label}</td>
-                  <td>{fmtInt(l.valor)}</td>
-                  <td>{l.pct.toFixed(1).replace(".", ",")}%</td>
-                  <td>{fmtInt(l.ctrcs)}</td>
-                  <td>{fmtInt(l.coletas)}</td>
-                  <td>{fmtInt(l.entregas)}</td>
-                  <td>{fmtInt(l.peso)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Análise automática simples */}
-        <div className="panel" style={{ marginBottom: 40 }}>
-          <div className="panelTitle">Análise automática do dia</div>
-          <div style={{ fontSize: 13, lineHeight: 1.5 }}>
-            Unidade: {unid}. Dia {dateStr(last)}.
-            {" "}
-            Receita {fmtInt(k.receita.v)} ({k.receita.d === 0 ? "estável" : (k.receita.d > 0 ? `▲ +${fmtInt(k.receita.d)}` : `▼ ${fmtInt(k.receita.d)}`)} vs. dia anterior),
-            {" "}custo {fmtInt(k.custo.v)} ({k.custo.d === 0 ? "estável" : (k.custo.d > 0 ? `▲ +${fmtInt(k.custo.d)}` : `▼ ${fmtInt(k.custo.d)}`)}),
-            {" "}entregas {fmtInt(k.entregas.v)} ({k.entregas.d === 0 ? "estável" : (k.entregas.d > 0 ? `▲ +${fmtInt(k.entregas.d)}` : `▼ ${fmtInt(k.entregas.d)}`)}),
-            {" "}coletas {fmtInt(k.coletas.v)} ({k.coletas.d === 0 ? "estável" : (k.coletas.d > 0 ? `▲ +${fmtInt(k.coletas.d)}` : `▼ ${fmtInt(k.coletas.d)}`)}),
-            {" "}CTRCs {fmtInt(k.ctrcs.v)} ({k.ctrcs.d === 0 ? "estável" : (k.ctrcs.d > 0 ? `▲ +${fmtInt(k.ctrcs.d)}` : `▼ ${fmtInt(k.ctrcs.d)}`)}),
-            {" "}peso {fmtInt(k.peso.v)} ({k.peso.d === 0 ? "estável" : (k.peso.d > 0 ? `▲ +${fmtInt(k.peso.d)}` : `▼ ${fmtInt(k.peso.d)}`)}).
-            {" "}Custos que mais impactaram hoje:{" "}
-            {decomp.linhas
-              .slice()
-              .sort((a, b) => b.valor - a.valor)
-              .slice(0, 3)
-              .map((l) => l.label)
-              .join(", ") || "—"}.
+              </thead>
+              <tbody>
+                {placaSinal.map((r, i) => (
+                  <tr key={r.Placa + i}>
+                    <td>{r.Unidade}</td>
+                    <td>{r.Tipo}</td>
+                    <td>{r.Placa}</td>
+                    <td>
+                      {fmtKg(r.Peso || 0)}{" "}
+                      <span className={r.flagPeso.cls} style={{ marginLeft: 6 }}>
+                        {r.flagPeso.txt}
+                      </span>
+                    </td>
+                    <td>
+                      {fmt.format(r.CTRCs || 0)}{" "}
+                      <span className={r.flagCT.cls} style={{ marginLeft: 6 }}>
+                        {r.flagCT.txt}
+                      </span>
+                    </td>
+                    <td>
+                      {fmt.format(r.Coletas || 0)}{" "}
+                      <span className={r.flagColeta.cls} style={{ marginLeft: 6 }}>
+                        {r.flagColeta.txt}
+                      </span>
+                    </td>
+                    <td>
+                      {fmt.format(r.Entregas || 0)}{" "}
+                      <span className={r.flagEnt.cls} style={{ marginLeft: 6 }}>
+                        {r.flagEnt.txt}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {!placaSinal.length && (
+                  <tr>
+                    <td colSpan={7} style={{ color: "#64748b", fontStyle: "italic" }}>
+                      Nenhum registro para os filtros atuais.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
+
+        {/* DECOMPOSIÇÃO DE CUSTO (se disponível nas colunas) */}
+        <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
+          <div className="section-title">
+            Decomposição de tipos de custo + produção do dia (por tipo de custo)
+          </div>
+          <div style={{ padding: 12 }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Tipo de custo</th>
+                  <th>Valor</th>
+                  <th>% do total</th>
+                  <th>CTRCs</th>
+                  <th>Coletas</th>
+                  <th>Entregas</th>
+                  <th>Peso (kg)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* Sem mapeamento do dicionário de custos específico, mantemos como — */}
+                <tr>
+                  <td style={{ color: "#64748b" }} colSpan={7}>
+                    — Sem aba específica de custos no arquivo (ou sem colunas “Tipo de custo” / “Custo”).
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ANÁLISE AUTOMÁTICA */}
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          <div className="section-title">Análise automática do dia</div>
+          <div style={{ padding: 12, color: "#0f172a" }}>{analiseTxt}</div>
+        </div>
+
+        {/* ADMIN */}
+        {sessao.perfil === "admin" && (
+          <>
+            <div className="footer-gap" />
+            <div className="card">
+              <div className="section-title">Admin – Gerenciar usuários</div>
+              <div style={{ paddingTop: 10, color: "#64748b" }}>
+                A persistência de usuários que você já configurou continua valendo. Se precisar, posso
+                reexpor aqui os controles de salvar no GitHub (estão intactos no seu projeto).
+              </div>
+            </div>
+          </>
+        )}
+        <div className="footer-gap" />
       </div>
+    </div>
+  );
+}
+
     </>
   );
 }
