@@ -1,6 +1,11 @@
-
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import {
+  ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ScatterChart, Scatter,
+  PieChart, Pie, Cell
+} from "recharts";
 
 /* =========================
    CONFIG (manter layout e fluxo existentes)
@@ -319,11 +324,15 @@ const App: React.FC = () => {
   }
 
   useEffect(() => {
-    if (user) loadFromSharePoint();
+    if (user) {
+      // Força unidade do usuário comum
+      if (user.perfil === "user" && user.unidade) setUnidade(user.unidade);
+      loadFromSharePoint();
+    }
   }, [user]);
 
   // ======= FILTRO & AGREGAÇÃO =======
-  const unidades = useMemo(() => {
+  const unidadesRaw = useMemo(() => {
     if (!mapped?.unitCol) return [];
     const s = new Set<string>();
     rows.forEach((r) => {
@@ -332,6 +341,12 @@ const App: React.FC = () => {
     });
     return Array.from(s).sort();
   }, [rows, mapped]);
+
+  // Se user (perfil user) tiver unidade fixa, restringe a lista
+  const unidades = useMemo(() => {
+    if (user?.perfil === "user" && user.unidade) return [user.unidade];
+    return unidadesRaw;
+  }, [unidadesRaw, user]);
 
   const tipos = useMemo(() => {
     if (!mapped?.typeCol) return [];
@@ -359,7 +374,10 @@ const App: React.FC = () => {
     if (lastDate) {
       arr = arr.filter((r) => r.__date__ && +r.__date__ === +lastDate);
     }
-    if (unidade !== "(todos)" && mapped?.unitCol) {
+    // Restrição de perfil user: força unidade
+    if (user?.perfil === "user" && user.unidade && mapped?.unitCol) {
+      arr = arr.filter((r) => String(r[mapped.unitCol as string]) === user.unidade);
+    } else if (unidade !== "(todos)" && mapped?.unitCol) {
       arr = arr.filter((r) => String(r[mapped.unitCol as string]) === unidade);
     }
     if (tipo !== "(todos)" && mapped?.typeCol) {
@@ -369,7 +387,7 @@ const App: React.FC = () => {
       arr = arr.filter((r) => String(r[mapped.relCol as string]) === rel);
     }
     return arr;
-  }, [rows, lastDate, unidade, tipo, rel, mapped]);
+  }, [rows, lastDate, unidade, tipo, rel, mapped, user]);
 
   const totals = useMemo(() => {
     if (!mapped) return { receita: 0, custo: 0, entregas: 0, coletas: 0, ctrcs: 0, peso: 0 };
@@ -427,6 +445,20 @@ const App: React.FC = () => {
     }));
   }, [filtered, mapped]);
 
+  // Pie de custo por tipo
+  const costTable = useMemo(() => costBreakdown(filtered, mapped || undefined), [filtered, mapped]);
+  const pieData = useMemo(() => costTable.map(c => ({ name: c.nome, value: c.valor })), [costTable]);
+
+  // Top 12 coleta/entrega
+  const barsData = useMemo(() => {
+    return [...byPlaca]
+      .sort((a,b)=> (b.entregas+b.coletas) - (a.entregas+a.coletas))
+      .slice(0,12)
+      .map(r => ({ label: r.placa, Entregas: r.entregas, Coletas: r.coletas }));
+  }, [byPlaca]);
+
+  const scatterData = useMemo(() => byPlaca.map(r => ({ x: r.custo, y: r.retorno, label: r.placa })), [byPlaca]);
+
   /* =========================
      RENDER
   ========================= */
@@ -462,6 +494,17 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
+      {/* Print-only CSS (melhor PDF) */}
+      <style>{`
+        @media print {
+          @page { size: A4 landscape; margin: 10mm; }
+          .no-print { display: none !important; }
+          .shadow, .shadow-sm, .shadow-lg { box-shadow: none !important; }
+          .print-keep { break-inside: avoid; page-break-inside: avoid; }
+          body { background: white !important; }
+        }
+      `}</style>
+
       {/* Header */}
       <div className="sticky top-0 z-10 bg-[#0b3a8c] text-white shadow">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -474,18 +517,23 @@ const App: React.FC = () => {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs opacity-90">{user.usuario} ({user.perfil})</span>
-            <button onClick={logout} className="rounded-md bg-white/10 hover:bg白/20 px-3 py-1 text-sm">Sair</button>
+            <button onClick={logout} className="rounded-md bg-white/10 hover:bg白/20 px-3 py-1 text-sm no-print">Sair</button>
           </div>
         </div>
       </div>
 
       <div className="max-w-7xl mx-auto p-4 space-y-6">
         {/* Filtros */}
-        <div className="rounded-2xl bg-white shadow border p-3">
+        <div className="rounded-2xl bg-white shadow border p-3 no-print">
           <div className="flex flex-wrap items-end gap-3">
             <div className="grow min-w-[240px]">
-              <select className="w-full rounded-lg border px-3 py-2 bg-white" value={unidade} onChange={(e) => setUnidade(e.target.value)}>
-                <option>(todos)</option>
+              <select
+                className="w-full rounded-lg border px-3 py-2 bg-white"
+                value={unidade}
+                onChange={(e) => setUnidade(e.target.value)}
+                disabled={user.perfil === "user" && !!user.unidade}
+              >
+                {user.perfil === "admin" && <option>(todos)</option>}
                 {unidades.map((u) => <option key={u}>{u}</option>)}
               </select>
             </div>
@@ -513,9 +561,9 @@ const App: React.FC = () => {
         </div>
 
         {/* Resumo */}
-        <div className="rounded-2xl bg-white shadow border p-3">
+        <div className="rounded-2xl bg-white shadow border p-3 print-keep">
           <div className="text-sm text-slate-600 mb-3">
-            Resumo do dia {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"} — Unidades: {unidade === "(todos)" ? "(todas)" : unidade}.
+            Resumo do dia {lastDate ? lastDate.toLocaleDateString("pt-BR") : "—"} — Unidades: {user.perfil === "user" && user.unidade ? user.unidade : (unidade === "(todos)" ? "(todas)" : unidade)}.
           </div>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-6 gap-3">
@@ -562,7 +610,7 @@ const App: React.FC = () => {
 
         {/* Por Tipo → Placa (sinalização) */}
         {mapped?.plateCol && mapped?.typeCol && (
-          <div className="rounded-2xl bg-white shadow border">
+          <div className="rounded-2xl bg-white shadow border print-keep">
             <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">
               Por Tipo de Veículo → Placa (sinalização vs. média do tipo na unidade)
             </div>
@@ -597,7 +645,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Tabelas: receitas/custos por placa */}
+        {/* Tabelas e Gráficos */}
         {byPlaca.length > 0 && (
           <div className="grid lg:grid-cols-2 gap-4">
             <Card title="Top 10 Receitas por Placa (dia)">
@@ -614,44 +662,68 @@ const App: React.FC = () => {
                 rightCols={[3]}
               />
             </Card>
-            <Card title="Maiores Custos por Placa (Top 10 no dia)">
-              <SimpleTable
-                headers={["Placa", "Unidade", "Tipo", "Custo"]}
-                rows={[...byPlaca].sort((a,b)=>b.custo-a.custo).slice(0,10).map(r => [r.placa, r.unidade, r.tipo, fmtBRL(r.custo)])}
-                rightCols={[3]}
-              />
-            </Card>
             <Card title="Custo x Retorno por Placa (dispersão)">
-              <Scatter
-                width={520}
-                height={280}
-                points={byPlaca.map((r) => ({ x: r.custo, y: r.retorno, label: r.placa }))}
-                xLabel="Custo (R$)"
-                yLabel="Retorno"
-              />
+              <div style={{ width: "100%", height: 320 }}>
+                <ResponsiveContainer>
+                  <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="x" type="number" name="Custo (R$)" />
+                    <YAxis dataKey="y" type="number" name="Retorno" />
+                    <Tooltip cursor={{ strokeDasharray: "3 3" }} />
+                    <Legend />
+                    <Scatter name="Placas" data={scatterData} fill="#2563eb" />
+                  </ScatterChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+            <Card title="Coletas e Entregas por Placa (Top 12)">
+              <div style={{ width: "100%", height: 320 }}>
+                <ResponsiveContainer>
+                  <BarChart data={barsData} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="label" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="Entregas" fill="#2563eb" />
+                    <Bar dataKey="Coletas" fill="#10b981" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             </Card>
           </div>
         )}
 
-        {/* Gráfico barras: Coletas/Entregas por placa */}
-        {byPlaca.length > 0 && (
-          <Card title="Coletas e Entregas por Placa (Top 12)">
-            <Bars
-              width={900}
-              height={320}
-              data={[...byPlaca]
-                .sort((a,b)=> (b.entregas+b.coletas) - (a.entregas+a.coletas))
-                .slice(0,12)
-                .map(r => ({ label: r.placa, a: r.entregas, b: r.coletas }))}
-              aLabel="Entregas"
-              bLabel="Coletas"
-            />
+        {/* NOVO: Pizza custo por tipo */}
+        {!!pieData.length && (
+          <Card title="Custo por Tipo (representatividade no total do dia)">
+            <div style={{ width: "100%", height: 320 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Tooltip />
+                  <Legend />
+                  <Pie
+                    data={pieData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={110}
+                    label={(e: any) => `${e.name} (${((e.value/Math.max(1, totals.custo))*100).toFixed(1)}%)`}
+                  >
+                    {pieData.map((_, i) => (
+                      <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
           </Card>
         )}
 
-        {/* Decomposição de custos */}
+        {/* Decomposição de custos + produtividade por tipo */}
         {!!mapped?.costComponentCols.length && (
-          <div className="rounded-2xl bg-white shadow border">
+          <div className="rounded-2xl bg-white shadow border print-keep">
             <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">
               Decomposição de tipos de custo + produção do dia (por tipo de custo)
             </div>
@@ -669,7 +741,7 @@ const App: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {costBreakdown(filtered, mapped).map((r, i) => (
+                  {costTable.map((r, i) => (
                     <tr key={r.nome} className={i % 2 ? "bg-white" : "bg-slate-50"}>
                       <Td>{r.nome}</Td>
                       <Td className="text-right">{fmtBRL(r.valor)}</Td>
@@ -698,10 +770,10 @@ const App: React.FC = () => {
         )}
 
         {/* Análise automática do dia (texto) */}
-        <div className="rounded-2xl bg-white shadow border p-3">
+        <div className="rounded-2xl bg-white shadow border p-3 print-keep">
           <div className="font-semibold mb-2">Análise automática do dia</div>
           <div className="text-sm text-slate-800 leading-relaxed">
-            {renderNarrative({ unidade, lastDate, totals, byPlaca, costTable: costBreakdown(filtered, mapped || undefined) })}
+            {renderNarrative({ unidade: (user.perfil === "user" && user.unidade) ? user.unidade! : unidade, lastDate, totals, byPlaca, costTable })}
           </div>
         </div>
 
@@ -719,6 +791,8 @@ const App: React.FC = () => {
    SUBCOMPONENTES / HELPERS
 ========================= */
 
+const PIE_COLORS = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#22d3ee", "#84cc16", "#ec4899"];
+
 const Th: React.FC<React.HTMLAttributes<HTMLTableCellElement>> = ({ children, className }) => (
   <th className={`px-3 py-2 text-left font-semibold text-slate-700 ${className || ""}`}>{children}</th>
 );
@@ -733,7 +807,7 @@ const Kpi: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 );
 
 const Card: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <div className="rounded-2xl bg-white shadow border">
+  <div className="rounded-2xl bg-white shadow border print-keep">
     <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">{title}</div>
     <div className="p-3">{children}</div>
   </div>
@@ -828,10 +902,15 @@ function costBreakdown(rows: Row[], m?: MappedCols) {
   const out = m.costComponentCols.map((c) => {
     const valor = sumCols(rows, [c]);
     const pct = total > 0 ? valor / total : 0;
-    const ctrcs = sumCols(rows, m.ctrcsCols, true);
-    const coletas = sumCols(rows, m.coletasCols, true);
-    const entregas = sumCols(rows, m.entregasCols, true);
-    const peso = sumCols(rows, m.pesoCols, true);
+    // subset de linhas onde o tipo de custo ocorreu (>0)
+    const subset = rows.filter(r => {
+      const n = coerceNumberBR(r[c]);
+      return n != null && Math.abs(n) > 0;
+    });
+    const ctrcs = sumCols(subset, m.ctrcsCols, true);
+    const coletas = sumCols(subset, m.coletasCols, true);
+    const entregas = sumCols(subset, m.entregasCols, true);
+    const peso = sumCols(subset, m.pesoCols, true);
     // nome amigável
     const pretty = COST_LABELS[normalizeKey(c)] || c.replace(/^Sum/i, "");
     return { nome: pretty, valor, pct, ctrcs, coletas, entregas, peso };
@@ -839,78 +918,6 @@ function costBreakdown(rows: Row[], m?: MappedCols) {
   out.sort((a, b) => b.valor - a.valor);
   return out;
 }
-
-/* ======= SVG mini charts (sem libs externas) ======= */
-
-const Bars: React.FC<{
-  width: number; height: number;
-  data: { label: string; a: number; b: number }[];
-  aLabel: string; bLabel: string;
-}> = ({ width, height, data, aLabel, bLabel }) => {
-  const pad = 40;
-  const innerW = width - pad * 2;
-  const innerH = height - pad * 2;
-  const max = Math.max(1, ...data.map(d => Math.max(d.a, d.b)));
-  const barW = innerW / data.length;
-  const scaleY = (v: number) => innerH - (v / max) * innerH;
-
-  return (
-    <svg width={width} height={height} className="max-w-full">
-      <rect x={0} y={0} width={width} height={height} fill="white" stroke="#e5e7eb" />
-      <g transform={`translate(${pad},${pad})`}>
-        {data.map((d, i) => (
-          <g key={i} transform={`translate(${i * barW},0)`}>
-            {/* a */}
-            <rect x={barW*0.1} y={scaleY(d.a)} width={barW*0.35} height={innerH - scaleY(d.a)} fill="#2563eb" />
-            {/* b */}
-            <rect x={barW*0.55} y={scaleY(d.b)} width={barW*0.35} height={innerH - scaleY(d.b)} fill="#10b981" />
-            <text x={barW/2} y={innerH + 14} textAnchor="middle" fontSize="10" fill="#334155">{d.label}</text>
-          </g>
-        ))}
-        {/* legend */}
-        <g>
-          <rect x={0} y={-28} width={10} height={10} fill="#2563eb" />
-          <text x={14} y={-19} fontSize="11" fill="#334155">{aLabel}</text>
-          <rect x={100} y={-28} width={10} height={10} fill="#10b981" />
-          <text x={114} y={-19} fontSize="11" fill="#334155">{bLabel}</text>
-        </g>
-      </g>
-    </svg>
-  );
-};
-
-const Scatter: React.FC<{
-  width: number; height: number;
-  points: { x: number; y: number; label?: string }[];
-  xLabel: string; yLabel: string;
-}> = ({ width, height, points, xLabel, yLabel }) => {
-  const pad = 40;
-  const innerW = width - pad * 2;
-  const innerH = height - pad * 2;
-  const maxX = Math.max(1, ...points.map(p => p.x));
-  const maxY = Math.max(1, ...points.map(p => p.y));
-  const sx = (v: number) => pad + (v / maxX) * innerW;
-  const sy = (v: number) => pad + innerH - (v / maxY) * innerH;
-
-  return (
-    <svg width={width} height={height} className="max-w-full">
-      <rect x={0} y={0} width={width} height={height} fill="white" stroke="#e5e7eb" />
-      {/* axes */}
-      <line x1={pad} y1={pad} x2={pad} y2={height - pad} stroke="#94a3b8" />
-      <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="#94a3b8" />
-      {/* labels */}
-      <text x={width/2} y={height - 6} textAnchor="middle" fontSize="12" fill="#334155">{xLabel}</text>
-      <text x={14} y={height/2} textAnchor="middle" fontSize="12" fill="#334155" transform={`rotate(-90, 14, ${height/2})`}>{yLabel}</text>
-      {/* points */}
-      {points.map((p, i) => (
-        <g key={i}>
-          <circle cx={sx(p.x)} cy={sy(p.y)} r={4} fill="#2563eb" opacity="0.8" />
-          {p.label && <text x={sx(p.x)+6} y={sy(p.y)-6} fontSize="10" fill="#334155">{p.label}</text>}
-        </g>
-      ))}
-    </svg>
-  );
-};
 
 /* ======= Narrative ======= */
 
@@ -943,7 +950,7 @@ function renderNarrative(args: {
   return parts.join(" ");
 }
 
-/* ============== Admin (igual ao que já vinha funcionando) ============== */
+/* ============== Admin (mantido) ============== */
 
 const AdminBox: React.FC = () => {
   const [pat, setPat] = useState<string>(localStorage.getItem("gh_pat") || "");
@@ -1007,7 +1014,7 @@ const AdminBox: React.FC = () => {
   }
 
   return (
-    <div className="rounded-2xl bg-white shadow border p-3">
+    <div className="rounded-2xl bg-white shadow border p-3 print-keep">
       <div className="font-semibold mb-2">Admin — Gerenciar usuários</div>
       <div className="text-sm text-slate-600 mb-2">
         Repositório: <code>{GH_OWNER}/{GH_REPO}</code> — arquivo: <code>{GH_USERS_PATH}</code>
