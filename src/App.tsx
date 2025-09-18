@@ -459,6 +459,26 @@ const App: React.FC = () => {
 
   const scatterData = useMemo(() => byPlaca.map(r => ({ x: r.custo, y: r.retorno, label: r.placa })), [byPlaca]);
 
+  // ==== NOVO: “5 piores em Peso (por placa)”, usando a mesma lógica de sinalização da tabela ====
+  const worstWeightData = useMemo(() => {
+    if (!mapped) return [];
+    const sig = byTypePlateSignals(filtered, mapped); // usa mesma base da tabela
+    // Para cada placa, pegue o pior desvio (mais negativo)
+    const perPlate = new Map<string, { placa: string; peso: number; diff: number }>();
+    sig.forEach((r) => {
+      const diff = r.peso - r.avgPeso;
+      const prev = perPlate.get(r.placa);
+      if (!prev || diff < prev.diff) perPlate.set(r.placa, { placa: r.placa, peso: r.peso, diff });
+    });
+    return Array.from(perPlate.values())
+      .sort((a,b)=> a.diff - b.diff)
+      .slice(0,5)
+      .map(d => ({ label: d.placa, Peso: d.peso }));
+  }, [filtered, mapped]);
+
+  // ==== NOVO: Barras de valor total por tipo de custo (dia) ====
+  const costBarData = useMemo(() => costTable.map(c => ({ name: c.nome, valor: c.valor, pct: c.pct })), [costTable]);
+
   /* =========================
      RENDER
   ========================= */
@@ -621,6 +641,8 @@ const App: React.FC = () => {
                     <Th>Unidade</Th>
                     <Th>Tipo</Th>
                     <Th>Placa</Th>
+                    <Th className="text-right">Receita</Th>       {/* NOVO */}
+                    <Th className="text-right">Custo</Th>         {/* NOVO */}
                     <Th className="text-right">Peso</Th>
                     <Th className="text-right">CTRCs</Th>
                     <Th className="text-right">Coletas</Th>
@@ -629,10 +651,12 @@ const App: React.FC = () => {
                 </thead>
                 <tbody>
                   {byTypePlateSignals(filtered, mapped).map((r, i) => (
-                    <tr key={i} className={i % 2 ? "bg-white" : "bg-slate-50"}>
+                    <tr key={`${r.unidade}|${r.tipo}|${r.placa}|${i}`} className={i % 2 ? "bg-white" : "bg-slate-50"}>
                       <Td>{r.unidade}</Td>
                       <Td>{r.tipo}</Td>
                       <Td>{r.placa}</Td>
+                      <Td className="text-right">{fmtBRL(r.receitaPlaca || 0)}</Td>   {/* NOVO */}
+                      <Td className="text-right">{fmtBRL(r.custoPlaca || 0)}</Td>     {/* NOVO */}
                       <Td className="text-right"><BadgeSignal value={r.peso} avg={r.avgPeso} /></Td>
                       <Td className="text-right"><BadgeSignal value={r.ctrcs} avg={r.avgCtrcs} /></Td>
                       <Td className="text-right"><BadgeSignal value={r.coletas} avg={r.avgColetas} /></Td>
@@ -662,6 +686,23 @@ const App: React.FC = () => {
                 rightCols={[3]}
               />
             </Card>
+
+            {/* NOVO: 5 piores em Peso vs média (por placa) */}
+            <Card title="5 piores em Peso (comparado à média do tipo na unidade)">
+              <div style={{ width: "100%", height: 320 }}>
+                <ResponsiveContainer>
+                  <BarChart data={worstWeightData} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="label" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="Peso" fill="#ef4444" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+
             <Card title="Custo x Retorno por Placa (dispersão)">
               <div style={{ width: "100%", height: 320 }}>
                 <ResponsiveContainer>
@@ -676,6 +717,7 @@ const App: React.FC = () => {
                 </ResponsiveContainer>
               </div>
             </Card>
+
             <Card title="Coletas e Entregas por Placa (Top 12)">
               <div style={{ width: "100%", height: 320 }}>
                 <ResponsiveContainer>
@@ -694,7 +736,34 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* NOVO: Pizza custo por tipo */}
+        {/* NOVO: Barras de valor total por tipo de custo + tabela de % do total */}
+        {!!costBarData.length && (
+          <div className="grid lg:grid-cols-2 gap-4">
+            <Card title="Valor total por Tipo de Custo (dia)">
+              <div style={{ width: "100%", height: 360 }}>
+                <ResponsiveContainer>
+                  <BarChart data={costBarData} margin={{ top: 10, right: 20, bottom: 30, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={60} />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="valor" name="Valor (R$)" fill="#0b3a8c" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+            <Card title="% de cada Tipo de Custo sobre o CUSTO TOTAL (dia)">
+              <SimpleTable
+                headers={["Tipo de Custo", "% do Custo Total"]}
+                rows={costBarData.map(r => [r.name, (r.pct*100).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "%"])}
+                rightCols={[1]}
+              />
+            </Card>
+          </div>
+        )}
+
+        {/* NOVO (já existia): Pizza custo por tipo */}
         {!!pieData.length && (
           <Card title="Custo por Tipo (representatividade no total do dia)">
             <div style={{ width: "100%", height: 320 }}>
@@ -779,8 +848,8 @@ const App: React.FC = () => {
               totals,
               byPlaca,
               costTable,
-              filteredRows: filtered,     // << PASSA AS LINHAS FILTRADAS
-              mappedCols: mapped          // << E O MAPEAMENTO DE COLUNAS
+              filteredRows: filtered,     // passa as linhas filtradas
+              mappedCols: mapped          // e o mapeamento
             })}
           </div>
         </div>
@@ -869,14 +938,18 @@ const BadgeSignal: React.FC<{ value: number; avg: number }> = ({ value, avg }) =
 function byTypePlateSignals(rows: Row[], m: MappedCols) {
   if (!m.unitCol || !m.typeCol || !m.plateCol) return [];
   const keyUT = (r: Row) => `${r[m.unitCol!]}||${r[m.typeCol!]}`;
-  const groups = new Map<string, Row[]>();
+  const keyUTP = (r: Row) => `${r[m.unitCol!]}||${r[m.typeCol!]}||${r[m.plateCol!]}`;
+
+  const groupsUT = new Map<string, Row[]>();
   rows.forEach((r) => {
     const k = keyUT(r);
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k)!.push(r);
+    if (!groupsUT.has(k)) groupsUT.set(k, []);
+    groupsUT.get(k)!.push(r);
   });
+
+  // Médias por (Unidade, Tipo) baseadas na média dos REGISTROS (mesma lógica anterior)
   const avg = new Map<string, { peso: number; ctrcs: number; coletas: number; entregas: number }>();
-  for (const [k, items] of groups) {
+  for (const [k, items] of groupsUT) {
     const a = {
       peso: sumCols(items, m.pesoCols, true) / Math.max(items.length, 1),
       ctrcs: sumCols(items, m.ctrcsCols, true) / Math.max(items.length, 1),
@@ -885,23 +958,53 @@ function byTypePlateSignals(rows: Row[], m: MappedCols) {
     };
     avg.set(k, a);
   }
-  return rows.map((r) => {
-    const k = keyUT(r);
-    const a = avg.get(k) || { peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
-    return {
+
+  // Totais por (Unidade, Tipo, Placa) para Receita/Custo (e também métricas) — usados nas novas colunas
+  const totalsUTP = new Map<string, { receita: number; custo: number; peso: number; ctrcs: number; coletas: number; entregas: number }>();
+  rows.forEach((r) => {
+    const k = keyUTP(r);
+    const prev = totalsUTP.get(k) || { receita: 0, custo: 0, peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
+    prev.receita += sumCols([r], [m.receitaCol!]);
+    prev.custo   += sumCols([r], [m.custoTotalCol!]);
+    prev.peso    += sumCols([r], m.pesoCols, true);
+    prev.ctrcs   += sumCols([r], m.ctrcsCols, true);
+    prev.coletas += sumCols([r], m.coletasCols, true);
+    prev.entregas+= sumCols([r], m.entregasCols, true);
+    totalsUTP.set(k, prev);
+  });
+
+  // Para evitar linhas duplicadas por placa, retornamos UMA linha por (UT, Placa)
+  const emitted = new Set<string>();
+  const out: any[] = [];
+  rows.forEach((r) => {
+    const kUT  = keyUT(r);
+    const kUTP = keyUTP(r);
+    if (emitted.has(kUTP)) return;
+    emitted.add(kUTP);
+
+    const a = avg.get(kUT) || { peso: 0, ctrcs: 0, coletas: 0, entregas: 0 };
+    const t = totalsUTP.get(kUTP)!;
+
+    out.push({
       unidade: r[m.unitCol!],
       tipo: r[m.typeCol!],
       placa: r[m.plateCol!],
-      peso: clamp(sumCols([r], m.pesoCols, true)),
-      ctrcs: clamp(sumCols([r], m.ctrcsCols, true)),
-      coletas: clamp(sumCols([r], m.coletasCols, true)),
-      entregas: clamp(sumCols([r], m.entregasCols, true)),
+      // Para a sinalização, usamos os totais por placa
+      peso: clamp(t.peso),
+      ctrcs: clamp(t.ctrcs),
+      coletas: clamp(t.coletas),
+      entregas: clamp(t.entregas),
       avgPeso: clamp(a.peso),
       avgCtrcs: clamp(a.ctrcs),
       avgColetas: clamp(a.coletas),
       avgEntregas: clamp(a.entregas),
-    };
+      // NOVO: totais financeiros por placa
+      receitaPlaca: t.receita,
+      custoPlaca: t.custo,
+    });
   });
+
+  return out;
 }
 
 function costBreakdown(rows: Row[], m?: MappedCols) {
@@ -927,7 +1030,7 @@ function costBreakdown(rows: Row[], m?: MappedCols) {
   return out;
 }
 
-/* ======= Narrative (AGORA COM ANÁLISE DE TIPOS DE CUSTO) ======= */
+/* ======= Narrative (com análise de tipos de custo) ======= */
 
 function renderNarrative(args: {
   unidade: string;
@@ -935,15 +1038,15 @@ function renderNarrative(args: {
   totals: { receita: number; custo: number; entregas: number; coletas: number; ctrcs: number; peso: number };
   byPlaca: { placa: string; receita: number; custo: number; entregas: number; coletas: number; ctrcs: number; peso: number; retorno: number }[];
   costTable: { nome: string; valor: number; pct: number }[];
-  filteredRows: Row[];           // << NOVO
-  mappedCols: MappedCols | null; // << NOVO
+  filteredRows: Row[];
+  mappedCols: MappedCols | null;
 }) {
   const { unidade, lastDate, totals, byPlaca, costTable, filteredRows, mappedCols } = args;
   const uniTxt = unidade === "(todos)" ? "todas" : unidade;
   const dataTxt = lastDate ? lastDate.toLocaleDateString("pt-BR") : "—";
   const topRec = [...byPlaca].sort((a,b)=>b.receita-a.receita)[0];
   const topCus = [...byPlaca].sort((a,b)=>b.custo-a.custo)[0];
-  const worstRet = [...byPlaca].sort((a,b)=> (b.custo - b.entregas - b.coletas) - (a.custo - a.entregas - a.coletas))[0]; // custo alto e baixa produção
+  const worstRet = [...byPlaca].sort((a,b)=> (b.custo - b.entregas - b.coletas) - (a.custo - a.entregas - a.coletas))[0];
   const topCostType = costTable[0];
 
   const parts: string[] = [];
@@ -955,7 +1058,7 @@ function renderNarrative(args: {
   if (topCostType && topCostType.valor > 0) parts.push(`Tipo de custo com maior impacto no total: ${topCostType.nome} (${(topCostType.pct*100).toFixed(1)}% do custo do dia).`);
   if (worstRet) parts.push(`Atenção para baixa eficiência: placa ${worstRet.placa} com custo elevado frente à produção; avaliar escala, roteirização e relacionamento.`);
 
-  // ====== NOVO BLOCO: análise por tipo de custo ======
+  // Análise por tipo de custo (valor, % e peso vs receita)
   if (mappedCols && mappedCols.costComponentCols?.length && mappedCols.receitaCol) {
     const totalCustoDia = Math.max(0, totals.custo);
 
@@ -987,7 +1090,6 @@ function renderNarrative(args: {
       }
     }
   }
-  // ====== FIM DO BLOCO NOVO ======
 
   parts.push(`Sugestões: priorizar veículos com maior receita por operação; reduzir componentes de custo líderes; reavaliar diárias e eventos em placas com baixa produção; conferir devoluções/retornos e causas.`);
 
