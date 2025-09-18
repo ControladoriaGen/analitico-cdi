@@ -1,14 +1,4 @@
 [
-  {
-    "username": "gustavo",
-    "role": "admin",
-    "unidade": "*",
-    "hash": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"
-  },
-  {
-    "username": "ariel",
-    "role": "user",
-    "unidade": "BMA",
-    "hash": "b7e94be513e96e8c45cd23d162275e5a12ebde9100a425c4ebcdd7fa4dcd897c"
-  }
+  { "usuario": "gustavo", "senha": "123", "perfil": "admin" },
+  { "usuario": "operacao", "senha": "123", "perfil": "user", "unidade": "BMA" }
 ]
