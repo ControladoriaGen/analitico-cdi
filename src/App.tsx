@@ -1,3 +1,4 @@
+
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
@@ -773,7 +774,16 @@ const App: React.FC = () => {
         <div className="rounded-2xl bg-white shadow border p-3 print-keep">
           <div className="font-semibold mb-2">Análise automática do dia</div>
           <div className="text-sm text-slate-800 leading-relaxed">
-            {renderNarrative({ unidade: (user.perfil === "user" && user.unidade) ? user.unidade! : unidade, lastDate, totals, byPlaca, costTable })}
+            {renderNarrative({
+              unidade: (user.perfil === "user" && user.unidade) ? user.unidade! : unidade,
+              lastDate,
+              totals,
+              byPlaca,
+              costTable,                 // você já tem isso calculado
+              filteredRows: filtered,    // << passe as linhas filtradas do dia
+              mappedCols: mapped         // << passe o mapeamento de colunas
+            })}
+
           </div>
         </div>
 
@@ -927,8 +937,11 @@ function renderNarrative(args: {
   totals: { receita: number; custo: number; entregas: number; coletas: number; ctrcs: number; peso: number };
   byPlaca: { placa: string; receita: number; custo: number; entregas: number; coletas: number; ctrcs: number; peso: number; retorno: number }[];
   costTable: { nome: string; valor: number; pct: number }[];
+  filteredRows: Row[];                 // << NOVO
+  mappedCols: MappedCols | null;       // << NOVO
 }) {
-  const { unidade, lastDate, totals, byPlaca, costTable } = args;
+  const { unidade, lastDate, totals, byPlaca, costTable, filteredRows, mappedCols } = args;
+
   const uniTxt = unidade === "(todos)" ? "todas" : unidade;
   const dataTxt = lastDate ? lastDate.toLocaleDateString("pt-BR") : "—";
   const topRec = [...byPlaca].sort((a,b)=>b.receita-a.receita)[0];
@@ -942,8 +955,46 @@ function renderNarrative(args: {
 
   if (topRec && topRec.receita > 0) parts.push(`Maior receita no dia: placa ${topRec.placa} com ${fmtBRL(topRec.receita)}.`);
   if (topCus && topCus.custo > 0) parts.push(`Maior custo no dia: placa ${topCus.placa} com ${fmtBRL(topCus.custo)}.`);
-  if (topCostType && topCostType.valor > 0) parts.push(`Tipo de custo com maior impacto: ${topCostType.nome} (${(topCostType.pct*100).toFixed(1)}% do custo total).`);
+  if (topCostType && topCostType.valor > 0) parts.push(`Tipo de custo com maior impacto no total: ${topCostType.nome} (${(topCostType.pct*100).toFixed(1)}% do custo do dia).`);
   if (worstRet) parts.push(`Atenção para baixa eficiência: placa ${worstRet.placa} com custo elevado frente à produção; avaliar escala, roteirização e relacionamento.`);
+
+  // ====== NOVO BLOCO: análise por tipo de custo (valor, % do total e relação vs. receita dos veículos em que ocorre) ======
+  if (mappedCols && mappedCols.costComponentCols?.length && mappedCols.receitaCol) {
+    // Monta uma visão por tipo de custo com: valor no dia, % do custo total, receita somada das placas onde aquele custo ocorreu
+    const totalCustoDia = Math.max(0, totals.custo);
+
+    type Ctx = { nome: string; valor: number; pct: number; receitaAssoc: number; ratioCostOverRevenue: number };
+    const porTipo: Ctx[] = mappedCols.costComponentCols.map((col) => {
+      const nomeAmigavel =
+        COST_LABELS[normalizeKey(col)] || col.replace(/^Sum/i, "");
+      // subset: linhas do dia em que aquele tipo de custo aparece (>0)
+      const subset = filteredRows.filter(r => {
+        const n = coerceNumberBR(r[col]);
+        return n != null && Math.abs(n) > 0;
+      });
+      const valor = sumCols(subset, [col]);                               // valor desse tipo no dia
+      const pct   = totalCustoDia > 0 ? (valor / totalCustoDia) : 0;      // representatividade no custo total
+      const receitaAssoc = sumCol(subset, mappedCols.receitaCol);         // receita dos veículos onde esse custo ocorreu
+      const ratioCostOverRevenue = receitaAssoc > 0 ? (valor / receitaAssoc) : Infinity; // quão "pesado" é o custo frente à receita desses veículos
+      return { nome: nomeAmigavel, valor, pct, receitaAssoc, ratioCostOverRevenue };
+    }).filter(x => x.valor > 0)
+      .sort((a,b)=> b.valor - a.valor);
+
+    if (porTipo.length) {
+      // lista curta dos 3 maiores por valor
+      const top3 = porTipo.slice(0,3).map(t => `${t.nome}: ${fmtBRL(t.valor)} (${(t.pct*100).toFixed(1)}%)`).join("; ");
+      parts.push(`Por tipo de custo (dia), os maiores valores foram — ${top3}.`);
+
+      // maior "expressividade" comparado à receita dos veículos em que ocorre (maior razão custo/receita)
+      const candidatos = porTipo.filter(t => Number.isFinite(t.ratioCostOverRevenue) && t.receitaAssoc > 0);
+      if (candidatos.length) {
+        const piorRazao = [...candidatos].sort((a,b)=> b.ratioCostOverRevenue - a.ratioCostOverRevenue)[0];
+        const pctReceita = (piorRazao.ratioCostOverRevenue * 100);
+        parts.push(`O tipo de custo com maior peso relativo à receita dos veículos em que ocorre é ${piorRazao.nome}, somando ${fmtBRL(piorRazao.valor)} (${(piorRazao.pct*100).toFixed(1)}% do custo do dia) e equivalendo a ${pctReceita.toFixed(0)}% da receita desses veículos.`);
+      }
+    }
+  }
+  // ====== FIM DO BLOCO NOVO ======
 
   parts.push(`Sugestões: priorizar veículos com maior receita por operação; reduzir componentes de custo líderes; reavaliar diárias e eventos em placas com baixa produção; conferir devoluções/retornos e causas.`);
 
@@ -1040,6 +1091,10 @@ const AdminBox: React.FC = () => {
       {!!saveMsg && <div className="mt-2 text-sm">{saveMsg}</div>}
     </div>
   );
+};
+
+export default App;
+
 };
 
 export default App;
