@@ -881,7 +881,7 @@ const App: React.FC = () => {
                         <tr key={row.key} className={i % 2 ? "bg-white" : "bg-slate-50"}>
                           <Td>{row.label}</Td>
                           <Td className="text-right">{Number(row.value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</Td>
-                          <Td className="text-right">{row.pct.toFixed(1)}%</Td>
+                          <Td className="text-right">{row.pct.toFixed(1)}%</td>
                           <Td className="text-right">{row.ctrcs.toLocaleString("pt-BR")}</Td>
                           <Td className="text-right">{row.coletas.toLocaleString("pt-BR")}</Td>
                           <Td className="text-right">{row.entregas.toLocaleString("pt-BR")}</Td>
