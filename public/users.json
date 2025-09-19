@@ -1,5 +1,5 @@
 [
   { "usuario": "gustavop", "senha": "230899", "perfil": "admin" },
-  { "usuario": "arielf", "senha": "cont@2025", "perfil": "user", "unidade": "BMA" },
+  { "usuario": "arielf", "senha": "cont@2025", "perfil": "admin" },
   { "usuario": "marcesa", "senha": "1961", "perfil": "user", "unidade": "BMA" }
 ]
