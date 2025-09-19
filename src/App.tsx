@@ -746,7 +746,7 @@ const App: React.FC = () => {
                 rightCols={[3]}
               />
             </Card>
-            <Card title="Bottom 10 Receitas por Placa (dia)">
+            <Card title="Piores 10 Receitas por Placa (dia)">
               <SimpleTable
                 headers={["Placa", "Unidade", "Tipo", "Receita"]}
                 rows={[...byPlaca].sort((a,b)=>a.receita-b.receita).slice(0,10).map(r => [r.placa, r.unidade, r.tipo, fmtBRL(r.receita)])}
