@@ -47,8 +47,15 @@ const asDate = (v: any): Date | null => {
   if (v == null || v === "") return null;
   if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
   if (typeof v === "number") {
-    const o = XLSX.SSF.parse_date_code(v);
-    if (o && o.y && o.m && o.d) return new Date(o.y, o.m - 1, o.d);
+    // Tipos de TS não expõem SSF; usar any + fallback sem SSF se necessário
+    const SSF = (XLSX as any).SSF;
+    if (SSF && SSF.parse_date_code) {
+      const o = SSF.parse_date_code(v);
+      if (o && o.y && o.m && o.d) return new Date(o.y, o.m - 1, o.d);
+    }
+    // Fallback simples para serial Excel (base 1899-12-30)
+    const base = Date.UTC(1899, 11, 30);
+    return new Date(base + v * 86400000);
   }
   const s = String(v).trim();
   const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
@@ -118,27 +125,6 @@ type MappedCols = {
   costComponentCols: string[];
 };
 
-const COST_LABELS: Record<string, string> = (() => {
-  const map: Record<string, string> = {};
-  const put = (raw: string, label: string) => (map[normalizeKey(raw)] = label);
-  put("SumAjudante", "Custo de Ajudantes");
-  put("SumComissão_de_Recepção", "Comissão de Recepção");
-  put("SumDesconto_de_Coleta", "Desconto de Coletas");
-  put("SumDiária_Fixa", "Diárias Fixas: Agregados");
-  put("SumDiária_Manual", "Diária Manual");
-  put("SumDiária_Percentual", "Pagamento Percentual: Agregados");
-  put("SumEvento", "Diária de Eventos: Agregados");
-  put("SumGurgelmix", "Eventos Gurgelmix: Agregados");
-  put("SumHerbalife", "Eventos Herbalife: Agregados");
-  put("SumSaída", "Pagamento de Saídas");
-  put("SumSetor_400", "Pagamento Setor 400");
-  put("SumCusto_Fixo__Frota", "Custo Fixo: Frota");
-  put("SumCusto_Variável__Frota", "Custo Variável: Frota");
-  put("SumSal___Enc___Frota", "Custo de MO: Frota");
-  put("SumH_E__Frota", "Custo de HEX: Frota");
-  return map;
-})();
-
 function mapColumns(headers: string[]): MappedCols {
   const norm = (h: string) => normalizeKey(h);
   const has = (s: string, ...bits: string[]) => bits.every((b) => s.includes(b));
@@ -196,10 +182,9 @@ function sumCol(rows: Row[], col: string | null): number {
 }
 
 /* =========================
-   *** NOVO: Patch para Tipos de Custo (Sum*) ***
+   *** Tipos de Custo (Sum*) ***
 ========================= */
 
-// Labels oficiais (dicionário que você enviou)
 const COST_FIELD_LABELS: Record<string, string> = {
   SumAjudante: "Custo de Ajudantes",
   SumComissão_de_Recepção: "Comissão de Recepção",
@@ -219,7 +204,6 @@ const COST_FIELD_LABELS: Record<string, string> = {
 };
 const COST_KEYS = Object.keys(COST_FIELD_LABELS);
 
-// Parse monetário robusto
 function parseBRL(v: any): number {
   if (typeof v === "number") return v;
   if (v == null) return 0;
@@ -234,7 +218,6 @@ function parseBRL(v: any): number {
 }
 
 type RowAny = Record<string, any>;
-
 function buildCostTypeStats(rows: RowAny[]) {
   const totals: Record<string, number> = {};
   const productivity: Record<
@@ -524,18 +507,18 @@ const App: React.FC = () => {
     }));
   }, [filtered, mapped]);
 
-  // --- NOVO: Estatísticas por tipo de custo (com base no dicionário Sum*) ---
+  // --- Estatísticas por tipo de custo ---
   const { pie: costByTypePie, table: costByTypeTable, custoTotalDia } = useMemo(() => {
     return buildCostTypeStats(filtered);
   }, [filtered]);
 
-  // reaproveitar para gráficos de barras e % do total
+  // Barras por tipo / % do total
   const costBarData = useMemo(
     () => costByTypeTable.map(r => ({ name: r.label, valor: r.value, pct: custoTotalDia > 0 ? r.value / custoTotalDia : 0 })),
     [costByTypeTable, custoTotalDia]
   );
 
-  // Pie colors
+  // Cores do pie
   const PIE_COLORS = ["#2563eb","#10b981","#f59e0b","#ef4444","#8b5cf6","#22d3ee","#84cc16","#ec4899","#14b8a6","#0ea5e9","#e11d48","#7c3aed"];
 
   // Top barras e dispersão
@@ -771,7 +754,7 @@ const App: React.FC = () => {
               />
             </Card>
 
-            {/* 5 piores em Peso (comparado à média do tipo na unidade) */}
+            {/* 5 piores em Peso */}
             <Card title="5 piores em Peso (comparado à média do tipo na unidade)">
               <div style={{ width: "100%", height: 320 }}>
                 <ResponsiveContainer>
@@ -820,7 +803,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* *** NOVO BLOCO VISUAL: CUSTO POR TIPO + PRODUTIVIDADE POR TIPO *** */}
+        {/* *** Tipos de custo: pizza + produtividade *** */}
         {costByTypePie.length > 0 && (
           <div className="rounded-2xl bg-white shadow border print-keep">
             <div className="px-3 py-2 font-semibold bg-[#0b3a8c] text-white rounded-t-2xl">
@@ -895,7 +878,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Barras por tipo + % do total (reaproveitando a mesma agregação) */}
+        {/* Barras por tipo + % do total */}
         {!!costBarData.length && (
           <div className="grid lg:grid-cols-2 gap-4">
             <Card title="Valor total por Tipo de Custo (dia)">
@@ -942,7 +925,6 @@ const App: React.FC = () => {
               lastDate,
               totals,
               byPlaca,
-              // adaptamos para usar a agregação nova
               costTable: costByTypeTable.map(t => ({ nome: t.label, valor: t.value, pct: (custoTotalDia>0 ? t.value/custoTotalDia : 0) })),
               filteredRows: filtered,
               mappedCols: mapped
@@ -1123,7 +1105,6 @@ function renderNarrative(args: {
   if (worstRet) parts.push(`Atenção para baixa eficiência: placa ${worstRet.placa} com custo elevado frente à produção; avaliar escala, roteirização e relacionamento.`);
 
   if (mappedCols && mappedCols.receitaCol) {
-    const totalCustoDia = Math.max(0, totals.custo);
     type Ctx = { nome: string; valor: number; pct: number; receitaAssoc: number; ratioCostOverRevenue: number };
     const porTipo: Ctx[] = costTable.map((c) => {
       const subset = filteredRows.filter((r) => {
